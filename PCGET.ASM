@@ -1,25 +1,28 @@
 ;
+;  Morrow Disk Jockey 2D Serial Port
+;
 ;  PCGET - This CP/M program receives a file from a PC via a serial 
 ;  port and writes it to a file on the CP/M system. The file transfer uses
 ;  the XMODEM protocol. 
 ;
-;  Note this program is gutted from PCGET 1.2 by Mike Douglas for the
-;  Altair 2SIO
+;  Note this program is gutted from the Ward Christenson Modem program
 ;
-;  Hacked together by Patrick Linstruth for the DISK JOCKEY 2D
-;	Ver	Date	Desc
-;	1.0   12/30/20	Initial version
+;  Hacked together by Mike Douglas for the Morrow Disk Jockey 2 serial port
 ;
+;	Ver	Date	   Desc
+;   	---    --------    -----------------------------------------------
+;	1.0    12/24/20    Initial version
+
 ;  Serial Port Equates
 
-SIOBASE	EQU	0E000H		;DJ2D register base address
-SIOADR	EQU	SIOBASE+03F8H	;DJ2D data address
-SIOACR	EQU	SIOBASE+03F9H	;DJ2D status address
+BASE	EQU	0E000H		;PROM BASE ADDRESS
+SIOSR	EQU	BASE+3F9H	;SERIAL PORT STATUS REGISTER
+SIODR	EQU	BASE+3F8H	;SERIAL PORT DATA REGISTER
 
-XMTMASK	EQU	8		;MASK TO ISOLATE XMIT READY BIT
-XMTRDY	EQU	8		;VALUE WHEN READY
-RCVMASK	EQU	4		;MASK TO ISOLATE RECEIVE READY BIT
-RCVRDY	EQU	4		;BIT ON WHEN READY
+XMTMASK	EQU	08H		;MASK TO ISOLATE XMIT READY BIT
+XMTRDY	EQU	00H		;VALUE WHEN READY
+RCVMASK	EQU	04H		;MASK TO ISOLATE RECEIVE READY BIT
+RCVRDY	EQU	00H		;VALUE WHEN READY
 
 ;  Transfer related equates
 
@@ -36,163 +39,177 @@ CR	EQU	13
 ;  Verify a file name was specified
 
 	lda	PARAM1		;A=1st character of parameter 1
-	cpi	' '		;make sure something entered
-	jnz	doXfer
+	cpi	' '		;make sure file name present
+	jnz	haveFn		;yes, have a file name
+
 	lxi	d,mHelp		;display usage message
-	mvi	c,print
-	call	bdos
+	mvi	c,PRINT
+	call	BDOS
 	ret			;return to CPM
 
-;  doXfer - Switch to local stack and do the transfer
+haveFn	LXI	SP,STACK	;switch to local stack
 
-doXfer	lxi	h,0		;HL=0
-	dad	sp		;HL=STACK FROM CP/M
-	shld	STACK		;..SAVE IT
-	lxi	SP,STACK	;SP=MY STACK
+	lxi	d,mSend		;send message promt
+	MVI	C,PRINT		;print the send message
+	CALL	BDOS		;PRINT ID MESSAGE
+
 	xra	a
 	sta	SECTNO		;init sector number to zero
-	lxi	d,mSendA	;send message
-	mvi	c,PRINT		;print the send message
-	call	BDOS		;PRINT ID MESSAGE
 
 ;  GOBBLE UP GARBAGE CHARS FROM THE LINE
 
-purge	mvi	b,1		;times out after 1 second if no data
-	call	RECV
+purge	MVI	B,1		;times out after 1 second if no data
+	CALL	RECV
 	jc	RECEIVE$FILE	;line is clear, go receive the file
+
 	cpi	CTRLC		;exit if abort requested
 	jz	abort
+
 	jmp	purge
 ;
 ;**************RECEIVE FILE****************
 ;
 RECEIVE$FILE:
-	call	ERASE$OLD$FILE
-	call	MAKE$NEW$FILE
-	mvi	a,NAK
-	call	SEND		;SEND NAK
+	CALL	ERASE$OLD$FILE
+	CALL	MAKE$NEW$FILE
+	MVI	A,NAK
+	CALL	SEND		;SEND NAK
 
 RECV$LOOP:
 RECV$HDR:
-	mvi	b,3		;3 SEC TIMEOUT
-	call	RECV
-	jnc	RHNTO		;NO TIMEOUT
+	MVI	B,3		;3 SEC TIMEOUT
+	CALL	RECV
+	JNC	RHNTO		;NO TIMEOUT
 
 RECV$HDR$TIMEOUT:
 RECV$SECT$ERR:			;PURGE THE LINE OF INPUT CHARS
-	mvi	b,1		;1 SEC W/NO CHARS
-	call	RECV
-	jnc	RECV$SECT$ERR 	;LOOP UNTIL SENDER DONE
-	mvi	a,NAK
-	call	SEND		;SEND NAK
-	jmp	RECV$HDR
+	MVI	B,1		;1 SEC W/NO CHARS
+	CALL	RECV
+	JNC	RECV$SECT$ERR 	;LOOP UNTIL SENDER DONE
+
+	MVI	A,NAK
+	CALL	SEND		;SEND NAK
+	JMP	RECV$HDR
 
 ;GOT CHAR - MUST BE SOH OR CTRL-C TO ABORT
 
-RHNTO:	cpi	SOH
-	jz	GOT$SOH
+RHNTO:	CPI	SOH
+	JZ	GOT$SOH
+
 	cpi	CTRLC		;control-c to abort?
 	jz	abort
-	cpi	EOT
-	jz	GOT$EOT
-	jmp	RECV$SECT$ERR
+
+	CPI	EOT
+	JZ	GOT$EOT
+
+	JMP	RECV$SECT$ERR
 
 GOT$SOH:
-	mvi	b,1
-	call	RECV
-	jc	RECV$HDR$TIMEOUT
-	mov	d,A		;D=BLK #
-	mvi	b,1
-	call	RECV		;GET cma'D SECT #
-	jc	RECV$HDR$TIMEOUT
-	cma
-	cmp	d		;GOOD SECTOR #?
-	jz	RECV$SECTOR
-	jmp	RECV$SECT$ERR
+	MVI	B,1
+	CALL	RECV
+	JC	RECV$HDR$TIMEOUT
+
+	MOV	D,A		;D=BLK #
+	MVI	B,1
+	CALL	RECV		;GET CMA'D SECT #
+	JC	RECV$HDR$TIMEOUT
+
+	CMA
+	CMP	D		;GOOD SECTOR #?
+	JZ	RECV$SECTOR
+
+	JMP	RECV$SECT$ERR
 
 ;  Receive Sector
 
 RECV$SECTOR:
-	mov	a,D		;GET SECTOR #
-	sta	RSECTNO
-	mvi	c,0		;INIT CKSUM
-	lxi	h,80H		;POINT TO BUFFER
+	MOV	A,D		;GET SECTOR #
+	STA	RSECTNO
+	MVI	C,0		;INIT CKSUM
+	LXI	H,80H		;POINT TO BUFFER
+
 RECV$CHAR:
-	mvi	b,1		;1 SEC TIMEOUT
-	call	RECV		;GET CHAR
-	jc	RECV$HDR$TIMEOUT
-	mov	m,A		;STORE CHAR
-	inr	l		;DONE?
-	jnz	RECV$CHAR
+	MVI	B,1		;1 SEC TIMEOUT
+	CALL	RECV		;GET CHAR
+	JC	RECV$HDR$TIMEOUT
+
+	MOV	M,A		;STORE CHAR
+	INR	L		;DONE?
+	JNZ	RECV$CHAR
 
 ;VERIFY CHECKSUM
 
-	mov	d,C		;SAVE CHECKSUM
-	mvi	b,1		;TIMEOUT
-	call	RECV		;GET CHECKSUM
-	jc	RECV$HDR$TIMEOUT
-	cmp	d		;CHECK
-	jnz	RECV$SECT$ERR
-;
+	MOV	D,C		;SAVE CHECKSUM
+	MVI	B,1		;TIMEOUT
+	CALL	RECV		;GET CHECKSUM
+	JC	RECV$HDR$TIMEOUT
+
+	CMP	D		;CHECK
+	JNZ	RECV$SECT$ERR
+
 ;GOT A SECTOR, WRITE IF = 1+PREV SECTOR
-;
-	lda	RSECTNO
-	mov	b,A		;SAVE IT
-	lda	SECTNO		;GET PREV
-	inr	a		;CALC NEXT SECTOR #
-	cmp	b		;MATCH?
-	jnz	DO$ACK
+
+	LDA	RSECTNO
+	MOV	B,A		;SAVE IT
+	LDA	SECTNO		;GET PREV
+	INR	A		;CALC NEXT SECTOR #
+	CMP	B		;MATCH?
+	JNZ	DO$ACK
 
 ;GOT NEW SECTOR - WRITE IT
 
-	lxi	D,FCB
-	mvi	c,WRITE
-	call	BDOS
-	ora	a
-	jnz	WRITE$ERROR
-	lda	RSECTNO
-	sta	SECTNO		;UPDATE SECTOR #
-DO$ACK	mvi	a,ACK
-	call	SEND
-	jmp	RECV$LOOP
+	LXI	D,FCB
+	MVI	C,WRITE
+	CALL	BDOS
+	ORA	A
+	JNZ	WRITE$ERROR
+
+	LDA	RSECTNO
+	STA	SECTNO		;UPDATE SECTOR #
+
+DO$ACK	MVI	A,ACK
+	CALL	SEND
+	JMP	RECV$LOOP
 
 WRITE$ERROR:
-	call	ERXIT
-	db	13,10,10,'Error Writing File',13,10,'$'
+	CALL	ERXIT
+	DB	CR,LF,LF,'Error Writing File',CR,LF,'$'
 
 GOT$EOT:
-	mvi	a,ACK		;ACK THE EOT
-	call	SEND
-	lxi	D,FCB
-	mvi	c,CLOSE
-	call	BDOS
-	inr	a
-	jnz	XFER$CPLT
-	call	ERXIT
-	db	13,10,10,'Error Closing File',13,10,'$'
+	MVI	A,ACK		;ACK THE EOT
+	CALL	SEND
+	LXI	D,FCB
+	MVI	C,CLOSE
+	CALL	BDOS
+	INR	A
+	JNZ	XFER$CPLT
+
+	CALL	ERXIT
+	DB	CR,LF,LF,'Error Closing File',CR,LF,'$'
 ;
 ERASE$OLD$FILE:
-	lxi	D,FCB
-	mvi	c,SRCHF		;SEE IF IT EXISTS
-	call	BDOS
-	inr	a		;FOUND?
-	rz			;NO, RETURN
-ERAY:	lxi	D,FCB
-	mvi	c,ERASE
-	call	BDOS
-	ret
+	LXI	D,FCB
+	MVI	C,SRCHF		;SEE IF IT EXISTS
+	CALL	BDOS
+	INR	A		;FOUND?
+	RZ			;NO, RETURN
+
+ERAY:	LXI	D,FCB
+	MVI	C,ERASE
+	CALL	BDOS
+	RET
 ;
 MAKE$NEW$FILE:
-	lxi	D,FCB
-	mvi	c,MAKE
-	call	BDOS
-	inr	a		;FF=BAD
-	rnz			;OPEN OK
+	LXI	D,FCB
+	MVI	C,MAKE
+	CALL	BDOS
+	INR	A		;FF=BAD
+	RNZ			;OPEN OK
 
 ;DIRECTORY FULL - CAN'T MAKE FILE
-	call	ERXIT
-	db	13,10,10,'Error - Can''t Make File',13,10
-	db	'(directory must be full)',13,10,'$'
+	CALL	ERXIT
+	DB	CR,LF,LF,'Error - Can''t Make File',CR,LF
+	DB	'(directory must be full)',CR,LF,'$'
 ;
 ; S U B R O U T I N E S
 ;
@@ -200,86 +217,103 @@ MAKE$NEW$FILE:
 
 ;EXIT PRINTING MESSAGE FOLLOWING 'CALL ERXIT'
 
-ERXIT	pop	D		;GET MESSAGE
-	mvi	c,PRINT
-	call	BDOS		;PRINT MESSAGE
-EXIT	lhld	staCK		;GET ORIGINAL STACK
-	sphl			;RESTORE IT
-	ret			;--EXIT-- TO CP/M
+ERXIT	POP	D		;GET MESSAGE
+	MVI	C,PRINT
+	CALL	BDOS		;PRINT MESSAGE
+	JMP	WBOOT
 
 ; - - - - - - - - - - - - - - -
 ;MODEM RECV
 ;-------------------------------------
-RECV	push	D		;SAVE
-MSEC	lxi	d,(159 shl 8)	;49 cycle loop, 6.272ms/wrap * 159 = 1 second
+RECV	PUSH	D		;SAVE
+MSEC	lxi	d,(118 shl 8)	;66 cycles, 8.448ms/wrap*118=1s (2MHz)
 
-MWTI	lda	SIOACR
-	cma			;INVERTED
-	ani	RCVMASK
-	cpi	RCVRDY
-	jz	MCHAR		;GOT CHAR
-	dcr	e		;COUNT DOWN
-	jnz	MWTI		;FOR TIMEOUT
-	dcr	d
-	jnz	MWTI
-	dcr	b		;DCR # OF SECONDS
-	jnz	MSEC
+MWTI	lda	SIOSR		;(13) character received?
+	ANI	RCVMASK		;(7)
+	CPI	RCVRDY		;(7)
+	JZ	MCHAR		;(10) GOT CHAR
+
+; no character present, decrement timeout
+
+	cpi	0		;(7) waste some time
+	cpi	0		;(7) waste some time
+	DCR	E		;(5) COUNT DOWN
+	JNZ	MWTI		;(10) FOR TIMEOUT
+
+	DCR	D		;do msb every 256th time
+	JNZ	MWTI
+
+	DCR	B		;DCR # OF SECONDS
+	JNZ	MSEC
 
 ;MODEM TIMED OUT RECEIVING
 
-	pop	D		;RESTORE D,E
-	stc			;CARRY SHOWS TIMEOUT
-	ret
+	POP	D		;RESTORE D,E
+	STC			;CARRY SHOWS TIMEOUT
+	RET
 
 ;GOT MODEM CHAR
 
-MCHAR	lda	SIOADR
-	cma			;INVERTED
-	pop	D		;RESTORE DE
-	push	PSW		;CALC CHECKSUM
-	add	c
-	mov	c,A
-	pop	PSW
-	ora	a		;TURN OFF CARRY TO SHOW NO TIMEOUT
-	ret
+MCHAR	lda	SIODR		;A=character received
+	cma			;data was inverted
+	POP	D		;RESTORE DE
+	PUSH	PSW		;CALC CHECKSUM
+	ADD	C
+	MOV	C,A
+	POP	PSW
+	ORA	A		;TURN OFF CARRY TO SHOW NO TIMEOUT
+	RET
 
 ; - - - - - - - - - - - - - - -
 ;MODEM SEND CHAR ROUTINE
 ;----------------------------------
-;
-SEND	push	PSW		;CHECK IF MONITORING OUTPUT
-	add	c		;CALC CKSUM
-	mov	c,A
-SENDW	lda	SIOACR
-	cma			;INVERTED
-	ani	XMTMASK
-	cpi	XMTRDY
-	jnz	SENDW
-	pop	PSW		;GET CHAR
-	cma			;INVERTED
-	sta	SIOADR
-	ret
+SEND	PUSH	PSW		;CHECK IF MONITORING OUTPUT
+	ADD	C		;CALC CKSUM
+	MOV	C,A
 
-mSendA	db	'Send the file now using XMODEM...$'
-mHelp	db	CR,LF,'PCGET Ver 1.0 for DJ2D',CR,LF,LF
+SENDW	lda	SIOSR		;ok to transmit?
+	ANI	XMTMASK
+	CPI	XMTRDY
+	JNZ	SENDW
+
+	POP	PSW		;GET CHAR
+	cma			;convert to negative data
+	sta	SIODR		;send the character
+	cma			;restore original value
+	RET
+
+;-----------------------------------------
+;  messages
+;-----------------------------------------
+mHelp	db	CR,LF
+	db	'PCGET ver 1.0 for Disk Jockey 2D Serial Port',CR,LF
+	db	LF
+	db	'Receives a file from a PC through a serial port',CR,LF
+	db	'using the XMODEM protocol.',CR,LF
+	db	LF
 	db	'Usage: PCGET file.ext',CR,LF,'$'
+
+mSend	db	'Send file now using XMODEM...$'
 
 ;DONE - CLOSE UP SHOP
 
 XFER$CPLT:
-	call	ERXIT
-	db	13,10,10,'Transfer Complete',13,10,'$'
+	CALL	ERXIT
+	DB	CR,LF,LF,'Transfer Complete',CR,LF,'$'
 
 abort:	call	erxit
-	db	13,10,10,'Transfer Aborted',13,10,'$'
+	db	CR,LF,LF,'Transfer Aborted',CR,LF,'$'
 
 	DS	40	;STACK AREA
-STACK	DS	2	;STACK POINTER
+STACK	EQU	$
+
 RSECTNO	DS	1	;RECEIVED SECTOR NUMBER
 SECTNO	DS	1	;CURRENT SECTOR NUMBER 
+
 ;
 ; BDOS EQUATES (VERSION 2)
 ;
+WBOOT	EQU	0		;WARM BOOT JUMP ADDRESS
 RDCON	EQU	1
 WRCON	EQU	2
 PRINT	EQU	9
