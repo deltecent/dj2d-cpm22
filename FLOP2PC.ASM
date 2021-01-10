@@ -298,8 +298,12 @@ sendBuf	call	sndTrks		;send the buffered tracks via xmodem
 ;    start the program over.
 
 noExtra	call	sndEot		;send and get response for EOT
+
+	call	dRestor		;home
+
 	lxi	h,mDone		;print the all done message
 	call	dispMsg
+
 	jmp	getDrv		;start over asking for a drive
 	
 ;-----------------------------------------------------------------------------
@@ -1447,7 +1451,7 @@ s2InB	in	s2bCtl		;(10+1)see if a new character is present
 ;       2 = 88-SIO
 ;    inputs: a = port to transmit through
 ;	     b = character to send
-;    clobbers a
+;   outputs: a = character sent
 ;-----------------------------------------------------------------------------
 serOut	dcr	a		;3-way test
 	jz	s2OutA		;a was 1: 88-2SIO port A
@@ -1462,6 +1466,7 @@ djOut	lda	djCtl		;wait for OK to transmit
 	mov	a,b		;a=character to transmit
 	cma			;byte is inverted
 	sta	djDat		;send it
+	cma			;uninvert
 	ret
 
 ; Send character through 88-2SIO port A
