@@ -273,6 +273,9 @@ bufLoop	call	readTrk		;read into trkBuf
 	jnz	sendBuf		;so XMODEM won't time out
 
 	xchg			;de=current track pointer
+	lhld	trkLen		;fit another whole track?
+	dad	d
+	xchg			;de=end of next track pointer
 	lhld	bufEnd		;hl=end of buffering space
 	call	cmpDeHl		;compare current-end
 	jc	bufLoop		;still room, keep going	
@@ -1749,6 +1752,13 @@ dSecFmt	call	STATUS
 sptTbl	db	26,26,15,8	;sectors per track
 
 
+;--------------------------------------------------------------
+; dSecLen - 
+; On Entry:
+;    secFmt
+; On Exit:
+;    secLen - sector length (128,256,512,1024)
+;--------------------------------------------------------------
 dSecLen	xchg			;save hl in de
 	lda	secFmt		;sector length format (0-3)
 	lxi	h,128		;sector length 128 bytes
@@ -1768,12 +1778,18 @@ sLenDn	shld	secLen
 
 	ret
 
+;--------------------------------------------------------------
+; dTrkLen - calculates the number of bytes per track.
+; On Entry:
+;    secLen
+; On Exit:
+;    trkLen - track length (numSecs * secLen)
+;--------------------------------------------------------------
 dTrkLen push	h		;save hl
 	lxi	h,0		;initialize hl=0
 	lda	numSecs		;mult by num sectors
 
-tLenLp	jm	tLenDn
-	dad	d		;add sector length
+tLenLp	dad	d		;add sector length
 	dcr	a
 	jnz	tLenLp
 
