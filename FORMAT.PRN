@@ -1,0 +1,657 @@
+
+
+                ;*****************************************************************
+                ;*								 *
+                ;* Disk format program for Disk Jockey 2D controller.		 *
+                ;* 11/16/79							 *
+                ;*								 *
+                ;* Updated to run without CP/M on the DJ2D serial port.		 *
+                ;*								 *
+                ;*****************************************************************
+ 0100           	org	100h
+                
+ 0034 =         revnum	equ	52		;Revision # times 10
+ 0005 =         bdos	equ	5		;CP/M entry point
+ 0000 =         wboot	equ	0
+                
+ E000 =         origin	equ	0E000H
+ E3F8 =         DISKIO	EQU	ORIGIN+3f8h
+ E3FF =         DATREG	EQU	DISKIO+7
+ E3F9 =         DRVSEL	EQU	DISKIO+1
+ E3FB =         CSTALL	EQU	DISKIO+3
+ E3FC =         CMDREG	EQU	DISKIO+4
+ 0008 =         DSIDE	EQU	008H
+ 000F =         UNLOADB	EQU	00FH
+ 00F4 =         WTCMD	EQU	0F4H
+ 0059 =         SICMD	EQU	059H
+ 00D0 =         IMMIRQ	EQU	0D0H
+ 0018 =         UNLOADA	EQU	018H
+ 0009 =         RESTOR	EQU	009H
+ 0010 =         INDEX	EQU	010H
+ 0004 =         TRKZRO	EQU	4
+ 0001 =         intrqa	equ	1
+ 0004 =         intrqb	equ	4
+ 090D =         lhsdenb	equ	90dh
+ 080C =         lhddenb	equ	80ch
+ 0111 =         lhsdena	equ	111h
+ 0010 =         lhddena	equ	10h
+ 0008 =         abs	equ	08h
+ 000D =         acr	equ	0dh
+ 000A =         alf	equ	0ah
+ 007F =         adel	equ	7fh
+                
+                ; DJ2D UART Equates
+                
+ E3F8 =         drvBase	equ	0e3f8h		;drive base IO port
+ E3F8 =         sioADat equ     drvBase+0	;UART data register
+ E3F9 =         sioACtl equ     drvBase+1       ;UART status register
+ 0008 =         sioTdre equ     008h            ;mask to test for xmit ready
+ 0004 =         sioRdrf equ     004h            ;mask to test for rcv read
+                
+ 0100 31EF06    START	lxi	sp,stack
+ 0103 2A07E0    	LHLD	ORIGIN+7	;adjust
+ 0106 23        	INX	H		;   the
+ 0107 7E        	MOV	A,M		;   calling
+ 0108 211B03    	LXI	H,STDVSL+1	;   routines
+ 010B 110400    	LXI	D,4		;   for
+ 010E 77        	MOV	M,A		;   different
+ 010F EE03      	XRI	3		;   versions
+ 0111 19        	DAD	D		;   of the
+ 0112 77        	MOV	M,A		;   disk
+ 0113 19        	DAD	D		;   jockey
+ 0114 77        	MOV	M,A		;   controller
+ 0115 11FF04    	LXI	d,SMESSG	;print the
+ 0118 CD8E02    	CALL	pbuff		;   sign on message
+ 011B 11E104    CROK	LXI	d,DMESSG	;echo the CR and
+ 011E CD8E02    	CALL	pbuff		;   print drive select
+ 0121 CDB902    	CALL	rbuff		;wait for response
+ 0124 FE4E      	CPI	'N'		;   new parameter
+ 0126 CA1B01    	JZ	CROK		;   request
+ 0129 32B906    	STA	LETTER		;save for exit
+ 012C D641      	SUI	'A'		;test for good
+ 012E F23A01    	JP	NOTLOW		;   drive select
+ 0131 11CC04    INPUTB	LXI	d,BMESSG	;print the bad
+ 0134 CD8E02    	CALL	pbuff		;   input message
+ 0137 C31B01    	JMP	CROK		;   and wait for input
+                
+ 013A FE04      NOTLOW	CPI	4		;test for drive
+ 013C F23101    	JP	INPUTB		;   select too large
+ 013F 32BA06    	STA	DRVNO		;save drive no.
+                
+ 0142 110606    fmtsiz	lxi	d,denmsg	;Select the sector size
+ 0145 CD8E02    	call	pbuff
+ 0148 CDB902    	call	rbuff
+ 014B FE4E      	cpi	'N'
+ 014D CA1B01    	jz	CROK
+ 0150 D631      	sui	'1'		;Strip off ASCII bias
+ 0152 F25E01    	jp	sizchk
+ 0155 11CC04    sizerr	lxi	d,bmessg
+ 0158 CD8E02    	call	pbuff
+ 015B C34201    	jmp	fmtsiz
+                
+ 015E FE04      sizchk	cpi	4
+ 0160 D25501    	jnc	sizerr
+ 0163 32BC06    	sta	newsize
+                
+ 0166 115D05    SENDI	LXI	d,IMESSG	;send out the
+ 0169 218905    	LXI	h,JMESSG	;   diskette insert
+ 016C CD8302    	CALL	SENDMP		;   message
+                
+ 016F CDB902    GETIN2	CALL	rbuff		;wait for response
+ 0172 FE4E      	CPI	'N'		;test for new
+ 0174 CA1B01    	JZ	CROK		;   parameter request
+                
+ 0177 11B606    PROCED	lxi	d,acralf
+ 017A CD8E02    	call	pbuff
+                
+ 017D 3ABA06    	LDA	DRVNO		;get the drive no
+ 0180 4F        	MOV	C,A
+ 0181 3E7F      	MVI	A,07FH		;drive select bits
+                
+ 0183 07        QLOOP	RLC			;rotate select bits
+ 0184 0D        	DCR	C		;   to proper drive
+ 0185 F28301    	JP	QLOOP		;   position
+ 0188 E63F      	ani	3fh
+ 018A 32BB06    	STA	SELECT		;save for TRACK routine
+ 018D CD1A03    	call	stdvsl
+ 0190 CD2603    	call	model
+ 0193 011101    	lxi	b,lhsdena
+ 0196 CA9C01    	jz	prep
+ 0199 010D09    	lxi	b,lhsdenb
+ 019C 78        prep	mov	a,b
+ 019D CD1E03    	call	stbits
+ 01A0 79        	mov	a,c
+ 01A1 CD1E03    	call	stbits
+ 01A4 21FCE3    	lxi	h,cmdreg
+ 01A7 36D0      	mvi	m,immirq
+ 01A9 3E40      	mvi	a,40h
+ 01AB 3D        wirqd	dcr	a
+ 01AC C2AB01    	jnz	wirqd
+ 01AF 7E        	mov	a,m
+ 01B0 1F        	rar
+ 01B1 DAD501    	jc	notrdy
+ 01B4 17        	ral
+ 01B5 17        	ral
+ 01B6 DAD501    	jc	notrdy
+ 01B9 11B704    	lxi	d,wmessg
+ 01BC 17        	ral
+ 01BD DAD801    	jc	notrdyx
+ 01C0 110000    	LXI	D,0
+ 01C3 CD3903    	call	gtindx
+ 01C6 CD2203    IXLOOP	call	gtstat
+ 01C9 E610      	ani	index
+ 01CB A8        	xra	b
+ 01CC C2E501    	JNZ	dorest
+ 01CF 1B        	DCX	D
+ 01D0 7A        	MOV	A,D
+ 01D1 B3        	ORA	E
+ 01D2 C2C601    	JNZ	IXLOOP
+ 01D5 11A804    NOTRDY	LXI	d,RMESSG	;not ready message
+ 01D8 EB        notrdyx	xchg
+ 01D9 119F04    	LXI	d,AMESSG	;drive message
+ 01DC CD8302    	CALL	SENDMP		;send error message
+ 01DF CD2C03    	call	unload
+ 01E2 C36601    	JMP	SENDI		;back for more input
+                
+ 01E5 3609      dorest	MVI	M,RESTOR
+ 01E7 7E        wrstrs	mov	a,m
+ 01E8 1F        	rar
+ 01E9 D2E701    	jnc	wrstrs
+ 01EC 7E        wrstrd	MOV	A,M
+ 01ED 1F        	rar
+ 01EE DAEC01    	jc	wrstrd
+ 01F1 7E        	MOV	A,M
+ 01F2 E604      	ANI	TRKZRO
+ 01F4 CAD501    	JZ	NOTRDY
+                
+ 01F7 015704    	LXI	B,SDLIST
+ 01FA 213A04    	LXI	H,DLIST
+ 01FD CD2204    	CALL	OVLAY
+ 0200 017B04    	LXI	B,L128
+ 0203 214D04    	LXI	H,SLIST
+ 0206 CD2204    	CALL	OVLAY
+ 0209 3E2A      	mvi	a,'*'
+ 020B CD9902    	call	pchar
+ 020E CD4203    	CALL	INDEXP
+ 0211 2600      	MVI	H,0
+ 0213 CD6603    	CALL	TRACK
+ 0216 115E03    	LXI	D,TABLE
+ 0219 3ABC06    	lda	newsize
+ 021C 87        	add	a
+ 021D CA4A02    	jz	findix
+ 0220 6F        	mov	l,a
+ 0221 2600      	mvi	h,0
+ 0223 19        	DAD	D
+ 0224 4E        	MOV	C,M
+ 0225 23        	INX	H
+ 0226 46        	MOV	B,M
+ 0227 214D04    	LXI	H,SLIST
+ 022A CD2204    	CALL	OVLAY
+ 022D 016904    	LXI	B,DDLIST
+ 0230 213A04    	LXI	H,DLIST
+ 0233 CD2204    	CALL	OVLAY
+ 0236 CD2603    	call	model
+ 0239 011000    	lxi	b,lhddena
+ 023C CA4202    	jz	loadd
+ 023F 010C08    	lxi	b,lhddenb
+ 0242 78        loadd	mov	a,b
+ 0243 CD1E03    	call	stbits
+ 0246 79        	mov	a,c
+ 0247 CD1E03    	call	stbits
+ 024A CD4203    FINDIX	CALL	INDEXP
+ 024D 2601      	MVI	H,1
+ 024F 3E2A      TKSTEP	mvi	a,'*'
+ 0251 CD9902    	call	pchar
+ 0254 11FCE3    	LXI	D,CMDREG
+ 0257 3E59      	MVI	A,SICMD
+ 0259 12        	STAX	D
+ 025A 1A        WSICMS	LDAX	D
+ 025B 1F        	RAR
+ 025C D25A02    	JNC	WSICMS
+ 025F 1A        WSICMD	LDAX	D
+ 0260 1F        	RAR
+ 0261 DA5F02    	JC	WSICMD
+ 0264 CD6603    	CALL	TRACK
+ 0267 62        	MOV	H,D
+ 0268 24        	INR	H
+ 0269 3E4D      	MVI	A,77
+ 026B BC        	CMP	H
+ 026C C24F02    	JNZ	TKSTEP
+ 026F CD2C03    	call	unload
+ 0272 11B805    	lxi	d,fmessg
+ 0275 CD8E02    	call	pbuff
+ 0278 CDB902    	call	rbuff
+ 027B FE46      	cpi	'F'
+ 027D CA1B01    	jz	crok
+ 0280 C30000    	jmp	wboot
+                
+ 0283 E5        SENDMP	PUSH	h		;save second half
+ 0284 CD8E02    	CALL	pbuff		;send first half
+ 0287 3AB906    	LDA	LETTER		;print the
+ 028A CD9902    	CALL	pchar		;   letter
+ 028D D1        	POP	d		;send the second
+                
+                        ;write line until $ encountered
+                	;line is in DE
+ 028E 1A        pbuff	ldax	d
+ 028F FE24      	cpi	'$'
+ 0291 C8        	rz
+                
+ 0292 13                inx	d
+ 0293 CD9902    	call	pchar
+ 0296 C38E02    	jmp	pbuff
+                
+ 0299 4F        pchar	mov	c,a
+ 029A 3AF9E3    pchar1	lda	sioACtl		;wait until OK to xmit
+ 029D 2F        	cma			;inverted
+ 029E E608      	ani	sioTdre
+ 02A0 CA9A02    	jz	pchar1
+ 02A3 79        	mov	a,c		
+ 02A4 2F        	cma			;inverted
+ 02A5 32F8E3    	sta	sioADat		;send the character
+ 02A8 C9        	ret
+                
+ 02A9 3AF9E3    rchar	lda	sioACtl		;wait for a character
+ 02AC 2F        	cma			;inverted
+ 02AD E604      	ani	sioRdrf		;set z, clear a if no chr		
+ 02AF CAA902    	jz	rchar
+                
+ 02B2 3AF8E3    	lda	sioADat		;a = received character
+ 02B5 2F        	cma			;inverted
+ 02B6 E67F      	ani	07fh		;strip parity, clear Z unless null
+ 02B8 C9        	ret
+                
+ 02B9 0600      rbuff	mvi	b,0		;b = stored character count
+ 02BB 211003    	lxi	h,inbuf		;hl = pointer to inbuf
+ 02BE CDA902    nxtChar	call	rchar		;get character from serial port
+                
+                ; Look for special characters (CR, BS, control characters)
+                
+ 02C1 FE0D      	cpi	acr		;C/R?
+ 02C3 CA0603    	jz	cmdDone
+ 02C6 FE08      	cpi	abs		;back space?
+ 02C8 CAED02    	jz	backSpc
+ 02CB FE7F      	cpi	adel		;delete?
+ 02CD CAED02    	jz	backSpc
+ 02D0 FE20      	cpi	020h		;ignore control characters 
+ 02D2 DABE02    	jc	nxtChar
+ 02D5 FE61      	cpi	'a'		;convert lower to upper case (garbage past 'z')
+ 02D7 DADC02    	jc	upper
+ 02DA D620      	sui	020h
+ 02DC 4F        upper	mov	c,a		;save the character in c
+ 02DD 78        	mov	a,b		;any more room left?
+ 02DE FE09      	cpi	inlen-1	
+ 02E0 CABE02    	jz	nxtChar		;out of room for more characters
+ 02E3 71        	mov	m,c		;put the new character in the buffer
+ 02E4 23        	inx	h		;increment buffer pointer
+ 02E5 04        	inr	b		;increment stored character counter
+ 02E6 79        	mov	a,c		;a=current character
+ 02E7 CD9902    	call	pchar		;echo character in c to the serial port
+ 02EA C3BE02    	jmp	nxtChar		;not 1st on the line, continue
+                
+                ;  backSpc - backspace pressed. Backup up in the buffer and echo a backspace,
+                ;     space, backspace to visually delete the character.
+                
+ 02ED 78        backSpc	mov	a,b		;see if already at zero characters
+ 02EE B7        	ora	a
+ 02EF CABE02    	jz	nxtChar		;nothing to delete
+ 02F2 05        	dcr	b		;decrement the character count
+ 02F3 2B        	dcx	h		;and the the buffer pointer
+ 02F4 3E08      	mvi	a,abs		;echo BS, space, BS to do a delete
+ 02F6 CD9902    	call	pchar	
+ 02F9 3E20      	mvi	a,' '
+ 02FB CD9902    	call	pchar
+ 02FE 3E08      	mvi	a,abs
+ 0300 CD9902    	call	pchar
+ 0303 C3BE02    	jmp	nxtChar
+                
+                ;  cmdDone - Carriage return received. Zero terminate the string. Echo
+                ;     the carriage return and add a line feed.
+                
+ 0306 11B606    cmdDone	lxi	d,acralf	;echo carriage return, line-feed
+ 0309 CD8E02    	call	pbuff
+ 030C 3A1003    	lda	inbuf		;return first byte in a
+ 030F C9        	ret
+                
+ 0310 0000000000inbuf	db	0,0,0,0,0,0,0,0,0,0
+ 000A =         inlen	equ	$-inbuf
+                
+ 031A 32F9E3    STDVSL	STA	DISKIO+1
+ 031D C9        	RET
+                
+ 031E 32FAE3    STBITS	STA	DISKIO+2
+ 0321 C9        	RET
+                
+ 0322 3AFAE3    GTSTAT	LDA	DISKIO+2
+ 0325 C9        	RET
+                
+ 0326 3AF4E3    model	lda	diskio-4
+ 0329 FEC9      	cpi	0C9H		;ret
+ 032B C9        	ret
+                
+ 032C CD2603    unload	call	model
+ 032F 3E18      	mvi	a,unloada
+ 0331 CA1E03    	jz	stbits
+ 0334 3E0F      	mvi	a,unloadb
+ 0336 C31E03    	jmp	stbits
+                
+ 0339 CD2603    gtindx	call	model
+ 033C 0600      	mvi	b,0
+ 033E C8        	rz
+ 033F 0610      	mvi	b,index
+ 0341 C9        	ret
+                
+ 0342 CD3903    INDEXP	call	gtindx
+ 0345 CD2203    windxh	call	gtstat
+ 0348 E610      	ANI	INDEX
+ 034A A8        	xra	b
+ 034B CA4503    	JZ	windxh
+ 034E CD2203    windxl	call	gtstat
+ 0351 E610      	ani	index
+ 0353 A8        	xra	b
+ 0354 C24E03    	jnz	windxl
+ 0357 C9        	ret
+ 0358 CD3903    indxw	call	gtindx
+ 035B C34E03    	jmp	windxl
+                
+ 035E 7B04      TABLE	DW	L128
+ 0360 8404      	DW	L256
+ 0362 8D04      	DW	L512
+ 0364 9604      	DW	L1024
+                
+ 0366 3ABB06    TRACK	lda	select
+ 0369 CD1A03    	call	stdvsl
+ 036C AF        	XRA	A
+ 036D 32C603    	STA	SIDENO
+ 0370 CD8903    	CALL	WTRACK
+ 0373 CD2203    	call	gtstat
+ 0376 E608      	ANI	DSIDE
+ 0378 C0        	RNZ
+ 0379 3C        	INR	A
+ 037A 32C603    	STA	SIDENO
+ 037D 3ABB06    	LDA	SELECT
+ 0380 E6EF      	ANI	0EFH
+ 0382 CD1A03    	call	stdvsl
+                WIL
+ 0385 CD5803    	call	indxw
+ 0388 EB        	XCHG
+                
+ 0389 11FFE3    WTRACK	LXI	D,DATREG	;1791 data reg
+ 038C 2E01      	MVI	L,1	;initialize sector reg
+ 038E 01504E    	LXI	B,4e50H	;data & count
+ 038F =         OVLD1	EQU	$-2
+ 0391 3EF4      	MVI	A,WTCMD	;issue a write
+ 0393 32FCE3    	STA	CMDREG	;   track command
+ 0396 EB        	XCHG		;adjust the registers
+ 0397 70        WTL1	MOV	M,B	;index mark
+ 0398 0D        	DCR	C	;   preamble
+ 0399 C29703    	JNZ	WTL1	;   field
+ 039C 010C00    	LXI	B,0CH	;data & count
+ 039D =         OVLD2	EQU	$-2
+ 039F 70        WTL2	MOV	M,B	;index mark
+ 03A0 0D        	DCR	C	;   zero leader
+ 03A1 C29F03    	JNZ	WTL2	;   field
+ 03A4 36F6      OVLD3	MVI	M,0F6H	;special double
+ 03A6 36F6      	MVI	M,0F6H	;   density clock
+ 03A8 36F6      	MVI	M,0F6H	;   and data mark
+ 03AA 36FC      WTL3	MVI	M,0FCH	;index mark
+ 03AC 01324E    	LXI	B,4E32H	;data & count
+ 03AD =         OVLD4	EQU	$-2
+ 03AF 70        WTL4	MOV	M,B	;sector mark
+ 03B0 0D        	DCR	C	;   preamble
+ 03B1 C2AF03    	JNZ	WTL4	;   field
+ 03B4 010C00    SLOOP	LXI	B,0CH	;data & count
+ 03B5 =         OVLD5	EQU	$-2
+ 03B7 70        WTL5	MOV	M,B	;sector mark
+ 03B8 0D        	DCR	C	;   zero leader
+ 03B9 C2B703    	JNZ	WTL5	;   field
+ 03BC 36F5      OVLD6	MVI	M,0F5H	;special double
+ 03BE 36F5      	MVI	M,0F5H	;   density clock
+ 03C0 36F5      	MVI	M,0F5H	;   and data mark
+ 03C2 36FE      WTL6	MVI	M,0FEH	;sector mark
+ 03C4 72        	MOV	M,D	;track number
+ 03C5 3600      	MVI	M,0	;side number
+ 03C6 =         SIDENO	EQU	$-1
+ 03C7 73        	MOV	M,E	;sector number
+ 03C8 3601      	MVI	M,1	;sector length
+ 03C9 =         OVLS1	EQU	$-1
+ 03CA 36F7      	MVI	M,0F7H	;crc data bytes
+ 03CC 1C        	INR	E	;increment sector
+ 03CD 01164E    	LXI	B,4E16H	;data & count
+ 03CE =         OVLD7	EQU	$-2
+ 03D0 70        WTL7	MOV	M,B	;sector mark
+ 03D1 0D        	DCR	C	;   postamble
+ 03D2 C2D003    	JNZ	WTL7	;   field
+ 03D5 010C00    	LXI	B,0CH	;data & count
+ 03D6 =         OVLD8	EQU	$-2
+ 03D8 70        WTL8	MOV	M,B	;data mark
+ 03D9 0D        	DCR	C	;   zero leader
+ 03DA C2D803    	JNZ	WTL8	;   field
+ 03DD 36F5      OVLD9	MVI	M,0F5H	;special double
+ 03DF 36F5      	MVI	M,0F5H	;   density clock
+ 03E1 36F5      	MVI	M,0F5H	;   and data mark
+ 03E3 36FB      WTL9	MVI	M,0FBH	;data mark
+ 03E5 0140E5    	LXI	B,0e540H	;data & count
+ 03E6 =         OVLS2	EQU	$-2
+ 03E8 70        WTL10	MOV	M,B	;write first
+ 03E9 0D        	DCR	C	;   quarter of
+ 03EA C2E803    	JNZ	WTL10	;   sector data
+ 03ED 0E40      	MVI	C,40H	;count
+ 03EE =         OVLS3	EQU	$-1
+ 03EF 70        WTL11	MOV	M,B	;write second
+ 03F0 0D        	DCR	C	;   quarter of
+ 03F1 C2EF03    	JNZ	WTL11	;   sector data
+ 03F4 0E40      	MVI	C,40H	;count
+ 03F5 =         OVLS4	EQU	$-1
+ 03F6 70        WTL12	MOV	M,B	;write third
+ 03F7 0D        	DCR	C	;   quarter of
+ 03F8 C2F603    	JNZ	WTL12	;   sector data
+ 03FB 0E40      	MVI	C,40H	;count
+ 03FC =         OVLS5	EQU	$-1
+ 03FD 70        WTL13	MOV	M,B	;write fourth
+ 03FE 0D        	DCR	C	;   quarter of
+ 03FF C2FD03    	JNZ	WTL13	;   sector data
+ 0402 36F7      	MVI	M,0F7H	;crc data bytes
+ 0404 3E1B      	MVI	A,27	;last sector + 1
+ 0405 =         OVLS6	EQU	$-1
+ 0406 01364E    	LXI	B,4E36H	;count & data
+ 0407 =         OVLS7	EQU	$-2
+ 0409 70        WTL14	MOV	M,B	;data
+ 040A 0D        	DCR	C	;   postamble
+ 040B C20904    	JNZ	WTL14	;   field
+ 040E BB        	CMP	E	;last sector test
+ 040F C2B403    	JNZ	SLOOP
+ 0412 70        WTL15	MOV	M,B	;fill data
+ 0413 0D        	DCR	C	;   to index hole
+ 0414 C21204    	JNZ	WTL15
+ 0417 70        WTL16	MOV	M,B	;fill data
+ 0418 0D        	DCR	C	;   to index hole
+ 0419 C21704    	JNZ	WTL16
+ 041C 70        WTL17	MOV	M,B	;fill data
+ 041D 0D        	DCR	C	;   to index hole
+ 041E C21C04    	JNZ	WTL17
+ 0421 C9        	RET
+                
+ 0422 7E        OVLAY	MOV	A,M	;length of list
+ 0423 E5        	PUSH	H	;save list ptr
+ 0424 218903    	LXI	H,WTRACK	;overlay area
+ 0427 E3        	XTHL	;	recover	pointer
+ 0428 1600      	MVI	D,0
+ 042A 23        OVLAY1	INX	H	;increment pointer
+ 042B 5E        	MOV	E,M	;get offset
+ 042C E3        	XTHL		;exchange pointers
+ 042D 19        	DAD	D	;add the offset
+ 042E F5        	PUSH	PSW	;save length count
+ 042F 0A        	LDAX	B	;get replacement data
+ 0430 77        	MOV	M,A	;do the replacement
+ 0431 03        	INX	B	;next replacement data
+ 0432 F1        	POP	PSW	;recover length count
+ 0433 3D        	DCR	A	;decrement
+ 0434 E3        	XTHL		;exchange pointers
+ 0435 C22A04    	JNZ	OVLAY1
+ 0438 E1        	POP	H	;adjust stack
+ 0439 C9        	RET
+                
+                ;* The lists below represents the distances
+                ;* between successive locations of the WTRACK
+                ;* routine that are to be overlaid in order
+                ;* that the same routine will serve to format
+                ;* different sized and density diskette
+                ;* sector formats
+                
+ 043A 12        DLIST	DB	18	;length of list
+ 043B 06        	DB	OVLD1-WTRACK
+ 043C 01        	DB	1
+ 043D 0D        	DB	OVLD2-OVLD1-1
+ 043E 07        	DB	OVLD3-OVLD2
+ 043F 01        	DB	1
+ 0440 01        	DB	1
+ 0441 07        	DB	OVLD4-OVLD3-2
+ 0442 01        	DB	1
+ 0443 07        	DB	OVLD5-OVLD4-1
+ 0444 07        	DB	OVLD6-OVLD5
+ 0445 01        	DB	1
+ 0446 01        	DB	1
+ 0447 10        	DB	OVLD7-OVLD6-2
+ 0448 01        	DB	1
+ 0449 07        	DB	OVLD8-OVLD7-1
+ 044A 07        	DB	OVLD9-OVLD8
+ 044B 01        	DB	1
+ 044C 01        	DB	1
+                
+ 044D 09        SLIST	DB	9	;list length
+ 044E 40        	DB	OVLS1-WTRACK
+ 044F 1D        	DB	OVLS2-OVLS1
+ 0450 01        	DB	1
+ 0451 07        	DB	OVLS3-OVLS2-1
+ 0452 07        	DB	OVLS4-OVLS3
+ 0453 07        	DB	OVLS5-OVLS4
+ 0454 09        	DB	OVLS6-OVLS5
+ 0455 02        	DB	OVLS7-OVLS6
+ 0456 01        	DB	1
+                
+                ;* Overlay data for single density
+                ;* formatted diskettes
+                
+ 0457 28FF      SDLIST	DW	0FF28H
+ 0459 06        	DB	6
+ 045A C3AA03    	JMP	WTL3
+ 045D 1AFF      	DW	0FF1AH
+ 045F 06        	DB	6
+ 0460 C3C203    	JMP	WTL6
+ 0463 0BFF      	DW	0FF0BH
+ 0465 06        	DB	6
+ 0466 C3E303    	JMP	WTL9
+                
+                ;* Overlay data for double density
+                ;* formatted diskettes
+                
+ 0469 504E      DDLIST	DW	4E50H
+ 046B 0C        	DB	0CH
+ 046C 36F6      	MVI	M,0F6H
+ 046E 36        	DB	36H
+ 046F 324E      	DW	4E32H
+ 0471 0C        	DB	0CH
+ 0472 36F5      	MVI	M,0F5H
+ 0474 36        	DB	36H
+ 0475 164E      	DW	4E16H
+ 0477 0C        	DB	0CH
+ 0478 36F5      	MVI	M,0F5H
+ 047A 36        	DB	36H
+                
+                ;* Overlay data for single density
+                ;* 26 sectors/track 128 byte sectors
+                
+ 047B 00        L128	DB	0
+ 047C 20E5      	DW	0e520H
+ 047E 20        	DB	20H
+ 047F 20        	DB	20H
+ 0480 20        	DB	20H
+ 0481 1B        	DB	27
+ 0482 1BFF      	DW	0FF1BH
+                
+                ;* Overlay data for double density
+                ;* 26 sectors/track 256 byte sectors
+                
+ 0484 01        L256	DB	1
+ 0485 40E5      	DW	0e540H
+ 0487 40        	DB	40H
+ 0488 40        	DB	40H
+ 0489 40        	DB	40H
+ 048A 1B        	DB	27
+ 048B 364E      	DW	4E36H
+                
+                ;* Overlay data for double density
+                ;* 15 sectors/track 512 byte sectors
+                
+ 048D 02        L512	DB	2
+ 048E 80E5      	DW	0e580H
+ 0490 80        	DB	80H
+ 0491 80        	DB	80H
+ 0492 80        	DB	80H
+ 0493 10        	DB	16
+ 0494 6A4E      	DW	4E6AH
+                
+                ;* Overlay data for double density
+                ;* 8 sectors/track 1024 byte sectors
+                
+ 0496 03        L1024	DB	3
+ 0497 00E5      	DW	0e500H
+ 0499 00        	DB	0
+ 049A 00        	DB	0
+ 049B 00        	DB	0
+ 049C 09        	DB	9
+ 049D 744E      	DW	4E74H
+                
+ 049F 0D0A      AMESSG	db	acr,alf
+ 04A1 4472697665	db	'Drive $'
+ 04A8 204973204ERMESSG	db	' Is Not Ready.$'
+                
+ 04B7 2049732057WMESSG	db	' Is Write Protected.$'
+                
+ 04CC 0D0A      BMESSG	db	acr,alf
+ 04CE 496D70726F	db	'Improper Response.$'
+                
+ 04E1 0D0A      DMESSG	db	acr,alf
+ 04E3 53656C6563	db	'Select Drive (A,B,C,or D): $'
+                
+ 04FF 4469736B20SMESSG	db	'Disk Jockey 2D Disk Format program'
+ 0521 2052657669	db	' Revision '
+ 052B 352E32    	db	'0'+revnum/10,'.','0'+(revnum MOD 10)
+ 052E 0D0A      	db	acr,alf
+ 0530 5479706520	db	'Type "^C" to return to CP/M, "N" to restart.$'
+                
+ 055D 0D0A      IMESSG	db	acr,alf
+ 055F 496E736572	db	'Insert a Write Enabled Diskette in Drive $'
+                
+ 0589 0D0A      JMESSG	db	acr,alf
+ 058B 436C6F7365	db	'Close the Drive Door and then Press RETURN: $'
+                
+ 05B8 0D0A      FMESSG	db 	acr,alf
+ 05BA 46756E6374	db	'Function Complete.'
+ 05CC 0D0A      	db	acr,alf
+ 05CE 5479706520	db	'Type RETURN to return to CP/M, or F to Format another: $'
+                
+ 0606 0D0A      denmsg	db	acr,alf
+ 0608 53656C6563	db	'Select a sector size:'
+ 061D 0D0A      	db	acr,alf
+ 061F 2020202020	db	'     1) 128 Byte Single density.'
+ 063F 0D0A      	db	acr,alf
+ 0641 2020202020	db	'     2) 256 Byte Double density.'
+ 0661 0D0A      	db	acr,alf
+ 0663 2020202020	db	'     3) 512 Byte Double Density.'
+ 0683 0D0A      	db	acr,alf
+ 0685 2020202020	db	'     4) 1024 Byte Double Density.'
+ 06A6 0D0A      	db	acr,alf
+ 06A8 536563746F	db	'Sector Size: $'
+                
+ 06B6 0D0A24    acralf	db	acr,alf,'$'
+                
+ 06B9 00        letter	db	0
+ 06BA 00        drvno	db	0
+ 06BB 00        select	db	0
+ 06BC 00        newsize	db	0
+                
+ 06BD           	ds	50
+ 06EF =         stack	equ	$
+ 06EF           	end
