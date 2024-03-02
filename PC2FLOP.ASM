@@ -4,8 +4,9 @@
 ;		(for DISK JOCKEY 2D disk controller)
 ;
 ;	This program writes a soft-sectored 8" floppy with a disk image
-;	transmitted from a PC. The image is transmitted through a 2SIO at I/O
-;	address 010h or 12h, or an SIO at address 0 using the XMODEM protocol.
+;	transmitted from a PC. The image is transmitted through the DJ2D
+;	serial port or an 88-2SIO at I/O address 010h or 12h using the
+;	XMODEM protocol.
 ;
 ;	The program talks directly to the DJ2D controller and does not
 ;	require CP/M or an OS to function.
@@ -29,7 +30,10 @@
 ;       controller by Mike Douglas.
 ;
 ;	Rev	 Date	    Desc
-;	1.0	01/15/21    Original
+;	1.0	01/17/21    Original
+;	1.1	03/02/24    (M. Douglas) Update the sector interleave
+;			    mechanism and how sectors/track, sector length,
+;			    and track length are determined.
 ;
 ;*****************************************************************************
 
@@ -110,21 +114,24 @@ getDrv	lxi	h,mDrive	;display drive number prompt
 
 ; Restore to track 0, verify drive is not write protected
 
-	call	dRestor		;restore to track 0 (selects drive)
+	call	dRestor		;restore to track 0
 
 ; Verify writes?
 
 	xra	a		;clear verify flag
 	sta	vfyFlag
 
-	lxi	h,mVerify	;display verify prompt
+vfyReq	lxi	h,mVerify	;display verify prompt
 	call	dispMsg
 	call	rcvCon		;get byte from the console
 	ori	20h		;upper case letters to lower case
-	cpi	'y'		;request verify?
-	jnz	getPort		;no
 
-	sta	vfyFlag		;make vfyFlag non-zero
+	cpi	'n'		;request verify?
+	jz	getPort		;no
+
+	cpi	'y'		;request verify?
+	jnz	vfyReq		;invalid response, retry	
+	sta	vfyFlag		;else make vfyFlag non-zero (true)
 
 ; getPort - get serial port number from the user.
 
@@ -149,7 +156,6 @@ getPort	lxi	h,mPort		;display transfer port prompt
 
 	xra	a		;init track we're reading to zero
 	sta	trkNum
-	sta	lastSec		;last sector accessed
 	sta	eotFlag		;clear EOT flag
 
 	inr	a		;init xmodem block number to one
@@ -202,8 +208,8 @@ trkLoop	call	wrtTrk		;write a track (hl=next track pointer)
 	pop	b		;bc=bytes remaining
 	jnc	trkLoop		;another full track is present
 
-	; If there is an incomplete track remaining in trkBuf,
-	; move remaining bytes to start of trkBuf and set rcvPtr
+; If there is an incomplete track remaining in trkBuf, move remaining bytes
+;     to start of trkBuf and set rcvPtr
 
 	lxi	h,trkBuf	;hl=start of trkBuf
 	mov	a,b		;any bytes to move?
@@ -365,39 +371,32 @@ wrtTrk	mvi	a,WRTRIES	;init write retry counter
 
 ; rtryWrt - write a track and the retry entry point.
 
-rtryWrt	mvi	d,1		;d=sector count
+rtryWrt	mvi	e,0FFh		;e=sector number, start at -1
 	
 ; wrtLoop - write a full track starting after the sector in e.
 
-wrtLoop	call	dSecSkw		;d=physical sector, return e=logical
+wrtLoop	call	dNxtSec		;e=sector to write
 	call	secOff		;set hl to sector trkPtr offset
-
 	call	dWrite		;write hl to sector e
 	jnz	wrtErr		;z clear = write failed
 
-	lda	numSecs
-	inr	d		;increment sector count
-	cmp	d
-	jnc	wrtLoop		;more sectors?
-
-	lda	vfyFlag		;verify?
-	ora	a
-	jz	skipVfy		;no, skip it
+	lda	numSecs		;loop for all sectors
+	cmp	e
+	jnz	wrtLoop
 
 ; Verify the track just written
 
-	mvi	d,1		;d=sector count
+	mvi	e,0FFh		;e=sector number, start at -1
 
 vfyLoop	call	chkQuit		;check for ctrl-c
-	call	dSecSkw		;d=physical sector, e=logical
+	call	dNxtSec		;e=sector to verify
 	lxi	h,secBuf	;temporary sector buffer
 	call	dVerify		;verify the sector
 	jnz	vfyRtry		;error, go to retry logic
 
-vfyNext	lda	numSecs
-	inr	d		;increment sector count
-	cmp	d
-	jnc	vfyLoop		;more sectors?
+vfyNext	lda	numSecs		;loop for all sectors
+	cmp	e
+	jnz	vfyLoop
 
 ; Track verified, set up for next track
 
@@ -405,9 +404,7 @@ skipVfy	lhld	trkLen		;get track length
 	xchg			;de = track length
 	lhld	trkPtr		;hl = trkPtr
 	dad	d		;hl = hl + de
-
 	shld	trkPtr		;save start of next track buffer
-
 	ret
 
 ; vfyRtry - verify failed, retry reads followed by a re-write
@@ -417,7 +414,6 @@ vfyRtry	mvi	a,RDTRIES	;init retry counter
 	sta	rdRetry
 
 retryLp	call	chkQuit		;check for ctrl-c
-	call	dSecSkw		;d=physical sector, e=logical
 	lxi	h,secBuf	;hl->temporary sector buffer
 	call	dVerify		;verify the sector
 	jz	vfyNext		;success, go verify next sector
@@ -429,8 +425,8 @@ retryLp	call	chkQuit		;check for ctrl-c
 	dcr	m
 	jnz	retryLp		;try again
 
-; read re-tries expired, decrement the write retry count and re-write
-;    if not expired
+; Write verify failed. Decrement the retry count and re-write if the count
+;    is not zero
 
 	lxi	h,wrRetry	;decrement the write retry counter
 	dcr	m
@@ -483,7 +479,6 @@ secOffL	dad	b		;add sector offset to hl
 
 	ret			;return hl=sector buffer
 
-	
 ;-----------------------------------------------------------------------------
 ; dispMsg - display the null-terminated message passed in hl on the
 ;    console device. Clobbers b, hl
@@ -496,7 +491,6 @@ dispMsg	mov	a,m		;get the next message byte
 	call	conOut
 	inx	h		;move to next byte
 	jmp	dispMsg
-
 
 ;-----------------------------------------------------------------------------
 ; rcvCon - Receive a character from the console device, echo it, then
@@ -744,8 +738,8 @@ ramLoop	mov	a,m		;a=current RAM content
 	inr	h		;next page
 	jnz	ramLoop
 
-; ramEnd - end of RAM found. Subtract 256 bytes from this to make room
-;   for xmodem packet overflow at the end.
+; ramEnd - end of RAM found. Subtract 256 bytes because it seems
+;   like a good idea.
 
 ramEnd	dcr	h		;hl=end of RAM + 1
 	shld	bufEnd		;save as bufEnd
@@ -785,10 +779,10 @@ subHlDe	mov	a,l		;subtract HL-DE, do lsbs first
 ;-----------------------------------------------------------------------------
 mWelcom	db	cr,lf,lf
 	db 	'===== PC to Floppy Disk Image Transfer =====',cr,lf
-	db	'      (DJ2D Controller @ E000, ver 1.0)',cr,lf,lf
-	db	'Writes an 8" floppy with a disk imaged received via a'
+	db	'      (DJ2D Controller @ E000, ver 1.1)',cr,lf,lf
+	db	'Writes an 8" floppy with a disk imaged received via the'
 	db	cr,lf
-	db	'DJ2D or 88-SIO serial port using the XMODEM protocol.',0
+	db	'DJ2D or 88-2SIO serial port using the XMODEM protocol.',0
 
 mDrive	db	cr,lf,lf,'Insert and specify destination drive ('
 mDrvMin	db	'x-'
@@ -828,14 +822,6 @@ mCpm	db	cr,lf,lf
 	db	'Insert CP/M disk into drive A, then press Return...',0
 
 mCrLf	db	cr,lf,0
-
-mFormat	db	cr,lf,lf,'Format the target disk? ',0
-
-mFmting	db	cr,lf,'  Formatting',0
-
-mFmtDon	db	cr,lf,'  Format complete',0
-
-mFmtErr	db	cr,lf,lf,'Formatting failed',cr,lf,0
 
 
 ;****************************************************************************
@@ -1052,36 +1038,24 @@ dSelDrv	lda	drvNum		;a=desired drive
 	ret
 
 ;--------------------------------------------------------------
-; dRestor - Selects drive and restores to track 0.
+; dRestor - Selects drive, loads heads and restores to track 0.
 ;    If restore fails, message display and program restarted
 ;    at getDrv.
 ; On Entry:
 ;    drvNum = drive to be selected and restored to track zero
 ; On Exit:
 ;    drive selected and on track zero
-;    sets trkNum, secFmt, numSecs, secLen, and trkLen.
-; Clobbers a,c
+; Clobbers none 
 ;--------------------------------------------------------------
 dRestor	call	dSelDrv		;make sure drive is selected
 	call	TKZERO
 	call	STATUS
 	mov	a,c		;get track number
 	ora	a		;track 0?
-	jnz	dResErr		;no, error
-
-	xra	a
-	sta	trkNum		;track 0
-	sta	secFmt		;track 0 is always SD
-
-	call	dScPrTr		;update secs per track
-	call	dSecLen		;update sector length
-	call	dTrkLen		;update track length
-
-	ret
+	jz	dScFmtA		;yes, set sector data and exit
 
 ; restore failed
 
-dResErr
 	lxi	h,mNoTrk0
 
 errMsg	call	dispMsg
@@ -1214,138 +1188,68 @@ dChkErr	ora	a		;test for error
 	jmp	errMsg
 
 ;--------------------------------------------------------------
-; dSecSkw - calculate sector skew
+; dNextSec - Move to next sector. Reads odd sectors first
+;    then even sectors. Very first call for a track should
+;    have sector -1 in e.
 ; On Entry:
-;    skewPtr = pointer to sector skew table
-;    d = physical sector
+;    e = last sector read 
 ; On Exit:
-;    e = logical sector
-; Clobbers b,c,h,l
+;    e = new sector to read
+; Clobbers e
 ;--------------------------------------------------------------
-dSecSkw	lhld	skewPtr
-	mvi	b,0
-	mov	c,d
-	dcr	c
-	dad	b
-	mov	e,m
+dNxtSec	inr	e		;read every other sector
+	inr	e
+	lda	numSecs		;past end?
+	cmp	e
+	rnc			;no
+
+	mvi	e,2		;else, do even sectors
 	ret
 
-; Sector skew is even then odd sectors
-
-skewTbl
-; 26 128-byte sectors / track
-	db	2,4,6,8,10,12,14,16,18,20,22,24,26
-	db	1,3,5,7,9,11,13,15,17,19,21,23,25
-; 26 256-byte sectors / track
-	db	2,4,6,8,10,12,14,16,18,20,22,24,26
-	db	1,3,5,7,9,11,13,15,17,19,21,23,25
-; 15 512-byte sectors / track
-	db	2,4,6,8,10,12,14,1,3,5,7,9,11,13,15
-	db	0,0,0,0,0,0,0,0,0,0,0
-; 8 1024-byte sectors / track
-	db	2,4,6,8,1,3,5,7,9
-	db	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-
-
 ;--------------------------------------------------------------
-; dSecFmt - reads STATUS from DJ2D and calculates
-;    secFmt (0=128,1=256,2=512,3=1024), numSecs, secLen, and
-;    trkLen.
+; dSecFmt - Set sectors per track, sector length, and track
+;    length from the most recent sector read.
+;
+; dScFmtA - Status already in A
+;
 ; On Entry:
-;    drive selected, sector read or written on desired track
+;    drive selected
 ; On Exit:
-;    secFmt - sector length (0-3)
 ;    numSecs - sectors per track (26,26,15,8)
 ;    secLen - sector length (128,256,512,1024)
-;    trkLen - numSecs * secLen
+;    trkLen - track length
 ;--------------------------------------------------------------
 dSecFmt	call	STATUS
 	rar			;sector length is bits 2-3
-	rar
-	ani	003h		;isolate bits and clear carry
-	sta	secFmt
-
-	call	dScPrTr		;update secs per track
-	call	dSecLen		;update sector length
-	call	dTrkLen		;update track length
-
-	ret
-
-;--------------------------------------------------------------
-; dScPrTr - calculates the number of sectors per track. Sets
-;    skewPtr.
-; On Entry:
-;    secFmt
-; On Exit:
-;    numSecs - sectors per track (26,26,15,8)
-;    skewPtr - points to sector skew table
-;--------------------------------------------------------------
-dScPrTr lda	secFmt		;sector length format (0-3)
-	lxi	h,sptTbl	;sectors per track table
-	mvi	d,0
+dScFmtA	ani	06h		;a=2*length code
+	mvi	d,0		;de=2*length code (16 bit)
 	mov	e,a
-	dad	d
+
+	lxi	h,sptTbl	;set sectors per track
+	dad	d		;index by length code
 	mov	a,m
 	sta	numSecs
+ 
+	lxi	h,seclTbl	;set sector length
+	dad	d		;index by length code
+	mov	c,m		;lsb
+	inx	h
+	mov	h,m		;msb
+	mov	l,c		;hl=sector length
+	shld	secLen
 
-	lda	secFmt
-	lxi	h,skewTbl	;sector skew table
-	mvi	d,0
-	mvi	e,26
-skewLp	dcr	a
-	jm	skewDn
-	dad	d
-	jmp	skewLp
-
-skewDn	shld	skewPtr
+	lxi	h,trklTbl	;set track length
+	dad	d		;index by length code
+	mov	c,m		;lsb
+	inx	h
+	mov	h,m		;msb
+	mov	l,c		;hl=track length
+	shld	trkLen
 	ret
 
-sptTbl	db	26,26,15,8	;sectors per track
-
-
-;--------------------------------------------------------------
-; dSecLen - 
-; On Entry:
-;    secFmt
-; On Exit:
-;    secLen - sector length (128,256,512,1024)
-;--------------------------------------------------------------
-dSecLen	xchg			;save hl in de
-	lda	secFmt		;sector length format (0-3)
-	lxi	h,128		;sector length 128 bytes
-
-sLenLp	dcr	a
-	jm	sLenDn
-	dad	h		;double sector length
-	jmp	sLenLp
-
-sLenDn	shld	secLen
-	xchg			;restore hl, sec len in de
-
-	ret
-
-;--------------------------------------------------------------
-; dTrkLen - calculates the number of bytes per track.
-; On Entry:
-;    secLen
-; On Exit:
-;    trkLen - track length (numSecs * secLen)
-;--------------------------------------------------------------
-dTrkLen push	h		;save hl
-	lhld	secLen		;hl=sector length
-	xchg			;de=sector length
-	lxi	h,0		;initialize hl=0
-	lda	numSecs		;mult by num sectors
-
-tLenLp	dad	d		;add sector length
-	dcr	a
-	jnz	tLenLp
-
-tLenDn	shld	trkLen		;store track len
-	xchg			;store result in de
-
-	pop	h		;restore hl
-	ret
+sptTbl	dw	26, 26, 15, 8
+seclTbl	dw	128, 256, 512, 1024
+trklTbl	dw	26*128, 26*256, 15*512, 8*1024
 
 ;**************************************************************************
 ; 
@@ -1356,7 +1260,6 @@ tLenDn	shld	trkLen		;store track len
 
 drvNum	ds	1		;drive number to use
 trkNum	ds	1		;track number to read
-lastSec	ds	1		;last sector accessed on track
 secFmt	ds	1		;0=128,1=256,2=512,3=1024
 secLen	ds	2		;sector length
 numSecs	ds	1		;number of sectors per track

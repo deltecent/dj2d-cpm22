@@ -3,7 +3,7 @@
 ;  Flop2PC - Transfer floppy image to PC over a serial port
 ;		(for DISK JOCKEY 2D disk controller)
 ;
-;	This program transmits an image of a SSDD soft-sectored 8" floppy
+;	This program transmits an image of a soft-sectored 8" floppy
 ;	to a PC. The image is transmitted through a DISK JOCKEY 2D with the
 ;       PROM at address E000, or a 88-2SIO at I/O address 010h or 012h
 ;       using the XMODEM protocol.
@@ -19,104 +19,83 @@
 ;	is exited with a CTRL-C and either warm boots CP/M or just starts
 ;       over when running stand alone.
 ;
+;	128, 256, 512, and 1024 byte sectors are supported. FLOP2PC will
+;	determine the sector length by reading the sector length byte
+;	from tracks 0 and 1.
+;
+;	Double-sided disks are not supported.
+;
 ;	Written by Patrick Linstruth based on FLOP2PC for the Tarbell
 ;       controller by Mike Douglas.
 ;
 ;	Rev	 Date	    Desc
-;	1.0	01/01/21    Original
+;	1.0	01/15/21    Original
+;	1.1	03/02/24    (M. Douglas) Add retries to track read loop,
+;			    update the sector interleave mechanism and
+;			    how sectors/track, sector length, and track
+;			    length are determined.
 ;
+; FLOP2PC first allocates a track buffer by searching for the top of
+; memory. The track buffer starts at trkBuf and ends at bufEnd.
+; When running under CP/M the top is memory is determined by the
+; start of the BIOS.
 ;
-; FLOP2PC first allocates a track buffer to searching for the top of
-; memory. The top of the track buffer is sized to fit tracks of
-; trkLen size. The buffer starts at trkBuf and ends at bufEnd.
+; mainLp is the main loop that reads tracks from disk into trkBuf
+; with readTrk. The DJ2D supports different sector sizes. When
+; seeking to tracks 0 and 1, sector 1 is read to determine the
+; sector length, sectors per track, and track length. The DJ2D
+; firmware does not provide a 1791 READ ADDRESS function, so the
+; sector is actually read.
 ;
-; mainLp is the main loop that reads tracks into trkBuf with
-; readTrk.
+; readTrk reads all the sectors of the track into trkBuf pointed
+; to by trkPtr. After all sectors are read, trkPtr points to the
+; end of track data + 1.
 ;
-; readTrk reads all the sectors of a track into trkBuf as pointed
-; to by trkPtr. Before reading a sector, trkPtr is advanced to
-; (sector-1) * sector size. After all sectors are read, trkPtr
-; points to the end of sector data.
-;
-; When trkBuf will not fit an additional track, sndTrks
+; When trkBuf will not fit another complete track, sndTrks
 ; sends trkBuf up to trkPtr in 128 byte packets using
-; the Xmodem protocol. When all sectors have been sent,
-; mainLp reads the next tracks into trkBuf.
+; the Xmodem protocol. When all packets have been sent,
+; mainLp reads the next tracks into trkBuf until all tracks
+; have been read and sent.
 ;
 ;
 ;                          ************
 ;                          *  trkBuf  *
 ;                          ************
-; sndPtr increased by +--> * Track 00 * <--+ trkPtr increased by
-;     length of track |    ************    | length of track as
-; as packets are sent +--> * Track 01 * <--+ tracks are read from
-;         over Xmodem |    ************    | disk
+; sndPtr increased by +--> *  TRK X   * <--+ trkPtr is increased by
+;    length of packet |    ************    | trkLen as tracks are
+; as packets are sent +--> *  TRK X+1 * <--+ read from disk
+;         over Xmodem |    ************    |
 ;                     |    * ........ *    |
 ;                     v    * ........ *    v
 ;                          * ........ *
 ;                          ************
-;                          * Track nn *
+;                          *  TRK X+n *
 ;                          ************
-;                          *  bufEnd  * <--- Tracks are received until
-;                          ************      trkPtr = bufEnd
+;                          *  bufEnd  * <--- Tracks are read until
+;                          ************      trkPtr + trkLen < bufEnd
 ;
 ; 1791 Sector Lengths:
 ;
-; 128	00	1 x 128
-; 256	01	2 x 128
-; 512	02	4 x 128
-; 1024	03	8 x 128
+; 00: 128	1 x 128
+; 01: 256	2 x 128
+; 02: 512	4 x 128
+; 03: 1024	8 x 128
 ;
 ;*****************************************************************************
-
-; DEBUG OUTPUT
-
-DEBUG	equ	0		;0=no debug to console; 1=debug to contsole
 
 ; DISK JOCKEY 2D Prom Address
 
 DJBASE	equ	0E000h
 IOBASE	equ	DJBASE+03f8H
 
-DBOOT	equ	DJBASE		;DOS bootstrap routine
-TERMIN	equ	DJBASE+003H	;serial input
-TRMOUT	equ	DJBASE+006H	;serial output
-TKZERO	equ	DJBASE+009H	;recalibrate (seek to TRK0)
-TRKSET	equ	DJBASE+00CH	;seek
-SETSEC	equ	DJBASE+00FH	;select sector
-SETDMA	equ	DJBASE+012H	;set DMA address
-READ	equ	DJBASE+015H	;read a sector of disk data
-WRITE	equ	DJBASE+018H	;write a sector of disk data
-SELDRV	equ	DJBASE+01BH	;select a disk drive
-TPANIC	equ	DJBASE+01EH	;test for panic character
-TSTAT	equ	DJBASE+021H	;serial status input
-DMAST	equ	DJBASE+024H	;read current DMA address
-STATUS	equ	DJBASE+027H	;disk status input
-DSKERR	equ	DJBASE+02AH	;loop to strobe error LED
-SETDEN	equ	DJBASE+02DH	;set density
-SETSID	equ	DJBASE+030H	;set side for 2-headed drives
-
 ; Disk information equates
 
 NUMTRK	equ	77		;number of tracks
-NUMSEC	equ	26		;number of sectors per track
 MINDRV	equ	0		;first drive number
 MAXDRV	equ	3		;max drive number 
 
 LTRKLEN	equ	(8 * 1024)	;length of largest track in bytes
 RDTRIES	equ	3		;disk retries per retry step
-
-; Specify head settle delay (in addition to the 10ms step delay provided
-;    by the 1791), and the amount of time to delay between reversing
-;    track steps (e.g., step in/out or step out/in sequence). 
-;
-; Set ONEMS to give a 1ms delay for a 19 cycle loop (8080) or a 18 cycle
-;    loop (Z80)
-
-HDSETL	equ	10		;10ms additional head settle after step
-STPREV	equ	10		;10ms delay when reversing step direction
-ONEMS	equ	105		;105*19 cycles = 1ms at 2Mhz (8080)
-;ONEMS	equ	267		;222*18 cycles = 1ms at 4Mhz (Z80)
 
 ; Monitor, CP/M boot entry points
 
@@ -208,7 +187,7 @@ getPort	lxi	h,mPort		;display transfer port prompt
 	lxi	h,mStart	;display start file transfer prompt
 	call	dispMsg
 
-clrRcv1	mvi	b,1		;1 second timeout
+clrRcv1	mvi	b,2		;2 second timeout
 	call	rcvByte		;loop until input clear for 1 second
 	jnz	clrRcv1
 
@@ -216,7 +195,7 @@ clrRcv1	mvi	b,1		;1 second timeout
 	sta	crcFlag
 
 waitNak	call	chkQuit		;give user chance to abort
-	mvi	b,1		;1 second
+	mvi	b,2		;2 second
 	call	rcvByte		;wait for a character
 	cpi	NAK
 	jz	haveNak		;have a NAK, use checksum protocol
@@ -231,17 +210,8 @@ waitNak	call	chkQuit		;give user chance to abort
 
 haveNak	xra	a		;init track we want to zero
 	sta	trkNum
-	sta	lastSec		;last sector accessed
-
 	inr	a		;init xmodem block number to one
 	sta	blkNum
-	sta	fmtFlag
-
-;	mvi	a,26		;track 0 is 26 sectors
-;	sta	numSecs
-
-	lxi	h,trkBuf	;trkBuf is initial starting point for
-	shld	sndPtr		;   XMODEM send
 
 ;-----------------------------------------------------------------------------
 ;  mainLp - Loop through all tracks on the disk buffering as many tracks
@@ -249,10 +219,6 @@ haveNak	xra	a		;init track we want to zero
 ;-----------------------------------------------------------------------------
 mainLp	lxi	h,trkBuf	;disk buffering always start at trkBuf
 	shld	trkPtr
-	if	DEBUG
-	call	dbgHl
-	db	cr,lf,'**mainLp trkPtr=',0
-	endif
 
 ; Read and buffer bufTrks tracks unless all tracks on drive reached first
 
@@ -261,10 +227,6 @@ bufLoop	call	readTrk		;read into trkBuf
 	lda	trkNum		;increment track number (preserve HL)
 	inr	a
 	sta	trkNum	
-	if	DEBUG
-	call	dbgA
-	db	'mainLp trkNum=',0
-	endif
 	cpi	NUMTRK		;done all tracks on the disk?
 	jz	sendBuf		;yes, go send the buffered tracks
 
@@ -288,15 +250,6 @@ sendBuf	call	sndTrks		;send the buffered tracks via xmodem
 	cpi	NUMTRK		;done all tracks?
 	jnz	mainLp		;no, not done yet
 
-; The entire disk has been read and (mostly) transmitted. See if there are
-;    left over bytes to send. If so, send them.
-
-	mov	a,l		;hl->next packet to send, a=lsb of ptr
-	cpi	trkBuf AND 0ffh	;pointing to lsb of address of trkBuf?
-	jz	noExtra		;same, no extra bytes to send
-
-	call	sndPkt		;otherwise, send one last packet
-
 ; Send EOT and wait for response. Then display the success message and
 ;    start the program over.
 
@@ -310,7 +263,7 @@ noExtra	call	sndEot		;send and get response for EOT
 	jmp	getDrv		;start over asking for a drive
 	
 ;-----------------------------------------------------------------------------
-; readTrk - read NUMSEC sectors from the current track into a trkBuf as
+; readTrk - read numSecs sectors from the current track into a trkBuf as
 ;   pointed to by trkPtr. After the track is read, trkPtr is updated
 ;   by the length of a track to point to the next track buffer. This
 ;   saved value is also returned in HL.
@@ -322,153 +275,50 @@ readTrk	lxi	h,trkNum	;get desired track from trkNum
 	xra	a
 	sta	trkErr		;no error on this track yet
 
-	mvi	a,2		;init retry step
-	sta	rtStep
+; Read an entire track. Tracks are read every other sector because the
+;   code in the DJ PROM can't keep up with consecutive sectors. Odd
+;   sectors are read first followed by even sectors (e.g., sector 25 to 2
+;   provides more time than 26 to 1). 
 
-	mvi	e,1
-
-; Read an entire track. Start after the sector in e. 
-
-	mvi	d,0ffh
-	lhld	trkPtr		;hl=track pointer
+	mvi	e,0FFh		;e=sector number, start at -1
 
 secLoop	call	chkQuit		;check for ctrl-c from operator
+	call	dNxtSec		;e = next sector to read
+	call	secOff		;hl->sector in trkBuf
+	call	dRead		;read sector e into trkBuf
+	jnz	secRtry		;error, run retry logic
 
-	call	dRead		;read sector e into hl
-	mov	a,d
-	ora	a
-	jp	nxtSec
-
-	lda	numSecs		;number of sectors was updated during read
-	mov	d,a		;update sector counter
-	if DEBUG
-	call	dbgA
-	db	'secLoop numSecs=',0
-	endif
-
-;	jnz	secRtry		;error, run retry logic	
-
-; Decrement sector count. If full track is done, increment trkPtr
-;   to point to the next track buffer in trkBuf and exit.
-
-nxtSec	lhld	secLen		;increment trkPtr
-	if DEBUG
-	call	dbgHl
-	db	'nxtSec secLen=',0
-	endif
-	mov	b,h
-	mov	c,l
-	lhld	trkPtr
-	dad	b
-	shld	trkPtr
-	if DEBUG
-	call	dbgHl
-	db	'nxtSec trkPtr=',0
-	endif
-	inr	e		;next sector
-	dcr	d		;decrement sector count
+nxtSec	lda	numSecs		;loop for all sectors
+	cmp	e
 	jnz	secLoop
 
-;	lhld	trkLen		;de=bytes in a track
-;	xchg
-;	lhld	trkPtr		;hl=current track pointer
-;	if DEBUG
-;	call	dbgHl
-;	db	'nxtSec trkPtr=',0
-;	call	dbgDe
-;	db	'nxtSec trkLen=',0
-;	endif
-;	dad	d		;hl=start of next track in trkBuf
-;	shld	trkPtr
-;	if DEBUG
-;	call	dbgHl
-;	db	'nxtSec new trkPtr=',0
-;	endif
+; track is done, set up for next track
+
+	lhld	trkLen
+	xchg			;de=track length
+	lhld	trkPtr		;hl=current track pointer
+	dad	d		;hl=start of next track in trkBuf
+	shld	trkPtr		;trkPtr = end of track + 1
 	ret
 
-	if 0
 ;--------------------------------------------------------------------------
-; secRtry - Read error retry logic. Three retry steps are tried in
-;   the order shown below:
-;
-;   Step    Action
-;    2	Re-read RDTRIES times
-;    1	Seek out one track and back, then re-read RDTRIES times
-;    0	Seek in one track and back, then re-read RDTRIES times
-;
-;    Upon entry, if the error is "sector not found," then retries are
-;    not performed since the controller has already tried to read the
-;    address mark across three revolutions.
+; secRtry - Read error retry logic. Because of the limitations of the
+;    DJ PROM, no head movment is done, just more reads.
 ;--------------------------------------------------------------------------	
-secRtry	ani	sSECERR		;sector not found error?
-	jnz	nxtStep		;yes, skip retries, go to next step
-
-	mvi	a,RDTRIES	;init retry counter
+secRtry	mvi	a,RDTRIES	;init retry counter
 	sta	rdRtry
 
-retryLp	call	dWtSec		;get bc=offset of sector e in track
-	lhld	trkPtr		;hl->start of current track buffer
-	dad	b		;hl->sector buffer
-
-	call	chkQuit		;check for ctrl-c
-	
+retryLp	call	chkQuit		;check for ctrl-c	
+	call	secOff		;hl->sector buffer
 	call	dRead		;read the sector
-	jz	rtDone		;success, retry is done
+	jz	nxtSec		;success, retry is done
 
 	lxi	h,rdRtry	;decrement retry counter
 	dcr	m
 	jnz	retryLp		;try again
-
-; nxtStep - move to the next retry step
-
-nxtStep	lxi	h,rtStep	;decrement to next retry step
-	dcr	m
-		
-	jz	skPast		;step 0, step in one track and come back	
-	jp	skBack		;step 1, step out one track and come back
-
-; All retry steps failed. Display the error, then jump back into the main
-;    read loop which will resume at the next sector.
-
-	call	dspErr		;give up, display the error
-
-; rtDone - retry logic is done. Reset the retry step counter and
-;    jump to end of sector processing above
-
-rtDone	mvi	a,2		;restart retry step counter
-	sta	rtStep
-	jmp	nxtSec
-
-;-----------------------------------------------------------------------------
-; skBack - step out then back in, retry read
-; skPast - step in then back out, retry read
-;-----------------------------------------------------------------------------
-skBack	lda	trkNum		;a=current track
-	dcr	a		;move out one track
-	jp	doBump		;not before track zero, do the step out
-
-skPast	lda	trkNum		;a=current track
-	inr	a		;move in one track
-	cpi	NUMTRK		;past end?
-	jnc	skBack		;yes, do seek back instead
 	
-doBump	mov	l,a
-	call	dSeek		;issue step out or in
-
-	mvi	a,STPREV	;delay for step direction reversal
-	call	delayMs
-
-	lxi	h,trkNum	;get desired track from trkNum
-	mov	l,m		;and put into l
-	call	dSeek		;seek back to the track
-
-	mvi	a,HDSETL	;delay head settle time after step
-	call	delayMs
-
-	call	dWtSec		;get bc=offset of sector within track
-	jmp	stpLoop		;start reads for new step
-
-	endif
+	call	dspErr		;give up, display the error
+	jmp	nxtSec
 
 ;-----------------------------------------------------------------------------
 ; sndTrks - send the tracks buffered in trkBuf via xmodem. trkPtr points
@@ -476,14 +326,7 @@ doBump	mov	l,a
 ;-----------------------------------------------------------------------------
 sndTrks	lhld	trkPtr		;hl=end of buffered data + 1
 	xchg			;de=end of buffered data + 1
-	lhld	sndPtr		;hl=start tranmission address
-
-	if DEBUG
-	call	dbgDe
-	db	cr,lf,'sndTrks trkPtr=',0
-	call	dbgHl
-	db	'sndTrks sndPtr=',0
-	endif
+	lxi	h,trkBuf	;trkBuf is initial starting point for
 
 sndLoop	push	d		;save end pointer
 	call	sndPkt		;send a packet
@@ -496,42 +339,16 @@ sndLoop	push	d		;save end pointer
 	lxi	b,PKTLEN	;bc=length of XMODEM packet
 	dad	b		;hl=address at end of NEXT packet + 1
 	call	cmpDeHl		;compare disk end - end of next packet
-	jc	sndDone		;next packet will pass the end, stop
+	rc			;done with track buffer, return
 
 	lxi	b,-PKTLEN	;restore hl
 	dad	b
 	jmp	sndLoop
 
-; sndDone - all the packets we can send have been sent. Move any bytes
-;    left over to just before the start of trkBuf. The next group of
-;    xmodem packets will be transmitted starting there.
+; sndDone - reset sndPtr to start of track buffer
 
-sndDone	call	subDeHl		;hl=de-hl = left over byte count - PKTLEN
-	mov	a,l		;a=left over count - PKTLEN
-	adi	PKTLEN		;a=left over byte count
-	mov	b,a		;b=count of bytes to move
-	lxi	h,trkBuf	;hl->start of trkBuf
-	jz	mvDone		;no bytes to move, we're done
-
-; Copy the leftover data backwards to just before the track buffer. The
-;   next XMODEM send sequence will start at the beginning of this copied
-;   data instead of at the start of trkBuf.
-
-moveLp	dcx	h		;hl->memory just before trkBuf
-	dcx	d		;de->unsent bytes from end of trkBuf
-	ldax	d		;move from end of trkBuf to before trkBuf
-	mov	m,a	
-	dcr	b
-	jnz	moveLp
-
-mvDone	shld	sndPtr		;save address from which to send next time
-
-	if DEBUG
-	call	dbgDe
-	db	'mvDone trkPtr=',0
-	call	dbgHl
-	db	'mvDone sndPtr=',0
-	endif
+sndDone	lhld	trkBuf		;hl=trkBuf
+	shld	sndPtr		;save address from which to send next time
 
 	ret
 
@@ -586,7 +403,7 @@ sndSkip	call	sndByte
 
 ;  All bytes sent. Wait for the response.
 
-	mvi	b,1		;1 second timeout
+	mvi	b,5		;5 second timeout
 	call	rcvByte		;get the response character
 	jz	sndFail		;timeout on response
 
@@ -625,7 +442,7 @@ sndFail	lxi	h,xmRetry	;point to retry counter
 
 ;  clrRcv2 - wait for one second of line clear time and send packet again.
 
-clrRcv2	mvi	b,1		;1 second timeout
+clrRcv2	mvi	b,2		;2 second timeout
 	call	rcvByte		;wait for 1 second of clear line
 	jnz	clrRcv2
 
@@ -686,7 +503,7 @@ sndEot	mvi	a,XMTRIES	;init retry counter
 
 reEot	mvi	a,EOT
 	call	sndByte
-	mvi	b,5		;3 second timeout
+	mvi	b,5		;5 second timeout
 	call	rcvByte		;
 	jz	eotFail		;timeout
 
@@ -706,6 +523,32 @@ eotFail	lxi	h,xmRetry	;point to retry counter
 	lxi	h,mNoAck
 	jmp	dispMsg
 
+;--------------------------------------------------------------
+; secOff - calculate sector buffer within trkPtr
+; On Entry:
+;    trkPtr = start of current track buffer
+;    secLen = length of sectors in this track
+;    e = sector number
+; On Exit:
+;    hl = sector buffer within trkPtr
+;    e = sector number
+; Cobbers:
+;    a
+;--------------------------------------------------------------
+secOff  mov	a,e		;a = sector number
+	lhld	secLen		;get sector length
+	mov	b,h		;bc = sector length
+	mov	c,l
+	lhld	trkPtr		;hl = start of current track buffer
+	dcr	a		;sector 1?
+	jz	secOffD		;yes
+
+secOffL	dad	b		;add sector offset to hl
+	dcr	a		;decrement sector
+	jnz	secOffL		;loop until done
+
+secOffD	ret			;return hl=sector buffer
+	
 ;-----------------------------------------------------------------------------
 ; dispMsg - display the null-terminated message passed in hl on the
 ;    console device. Clobbers b, hl
@@ -718,63 +561,6 @@ dispMsg	mov	a,m		;get the next message byte
 	mov	b,a		;conOut wants character in b
 	call	conOut
 	jmp	dispMsg
-
-;------------------------------------------------------------------------------
-; dispNib - DISPLAY VALUE IN A AS A SINGLE DIGIT ASCII-HEXIDECIMAL VALUE.
-;------------------------------------------------------------------------------
-dispNib	push	psw
-	push	b
-
-	cpi	10		;greater than 9?
-	jc	nibOut		;0-9
-	adi	007h
-
-nibOut	adi	'0'
-	mov	b,a
-	call	conOut
-
-	pop	b
-	pop	psw
-
-	ret
-
-;------------------------------------------------------------------------------
-; dispByt - DISPLAY VALUE IN A AS A TWO DIGIT ASCII-HEXIDECIMAL VALUE.
-; CLOBBERS NONE.
-;------------------------------------------------------------------------------
-dispByt	push	a
-	push	b
-	mov	b,a		;store value in b
-	ani	0F0h		;high nibble
-	rrc
-	rrc
-	rrc
-	rrc
-	call	dispNib		;print the 16's digit
-
-	mov	a,b
-	ani	0Fh
-	call	dispNib		;print the 1's digit
-	pop	b
-	pop	a
-	ret
-
-;------------------------------------------------------------------------------
-; dispWrd - DISPLAY VALUE IN HL AS A FOUR DIGIT ASCII-HEXIDECIMAL VALUE.
-; CLOBBERS NONE
-;------------------------------------------------------------------------------
-dispWrd	push	h		;save hl
-	push	b		;save bc
-	push	psw		;save af
-	mov	a,h		;store msb in a
-	call	dispByt		;print msb
-
-	mov	a,l		;store lsb in a
-	call	dispByt		;print lsb
-	pop	psw
-	pop	b
-	pop	h
-	ret
 
 ;-----------------------------------------------------------------------------
 ; rcvCon - Receive a character from the console device, echo it, then
@@ -800,7 +586,7 @@ rcvCon	call	conIn		;check for input
 rcvCr	call	conIn		;check for input
 	jz	rcvCr		;nothing
 
-	ani	7fh
+	ani	7Fh
 	cpi	CTRLC		;abort requested?
 	jz	pgmExit		;yes
 
@@ -1036,30 +822,10 @@ ramLoop	mov	a,m		;a=current RAM content
 	inr	h		;next page
 	jnz	ramLoop
 
-; ramEnd - end of RAM found. Now determine the end address + 1 of the
-;   last track buffer that will fit in RAM. Store in bufEnd
+; ramEnd - end of RAM found. Subtract 256 bytes because it seems
+;   like a good idea.
 
-ramEnd	xchg			;de=end of RAM + 1
-	mvi	a,-((LTRKLEN SHR 8) + 1) AND 0ffh
-	cmp	d		;force de < (10000h - LTRKLEN)
-	jnc	topOk
-
-	mov	d,a		;limit max address
-
-topOk	lxi	h,trkBuf	;hl=start of track buffer
-	lxi	b,LTRKLEN	;bc=length of track in bytes
-
-; Loop increasing hl by LTRKLEN until hl > end of RAM.
-
-bfEndLp	dad	b		;hl=hl+track length
-	call	cmpHlDe		;compare hl-de
-	jc	bfEndLp		;still more room, keep going
-
-; Subtract one track length from hl, this will be the end address + 1 of
-;   the the last track buffer that will fit in RAM
-
-	lxi	b,-LTRKLEN	;subtract one track length
-	dad	b		;hl = end address of last track + 1
+ramEnd	dcr	h		;back 1 page
 	shld	bufEnd		;save as bufEnd
 	ret
 
@@ -1092,30 +858,13 @@ subDeHl	mov	a,e		;subtract DE-HL, do lsbs first
 	mov	h,a		;msb result in h	
 	ret
 
-;--------------------------------------------------------------------
-; delayMs - delay number of MS specified in A. Clobbers B.
-;    Be sure to set the ONEMS equate as required for the
-;    target CPU.
-;--------------------------------------------------------------------
-delayMs	mvi	b,ONEMS		;loops for 1ms
-	
-dlyLoop	nop			;(4)
-	dcr	b		;(5 or 4)
-	jnz	dlyLoop		;(10)
-
-	dcr	a		;decrement ms counter
-	jnz	delayMs
-
-	ret
-
 ;---------------------------------------------------------------------
 ; Message constants
 ;---------------------------------------------------------------------
 mWelcom	db	cr,lf,lf
-	db	'*** BETA VERSION -- USE AT YOUR OWN RISK ***',cr,lf,lf
 	db	'===== Floppy to PC Disk Image Transfer =====',cr,lf
-	db	'      (DJ2D Controller @ E000, ver 1.0)',cr,lf,lf
-	db	'Sends an image of an 8" floppy to a PC via a DJ2D'
+	db	'      (DJ2D Controller @ E000, ver 1.1)',cr,lf,lf
+	db	'Sends an image of an 8" floppy to a PC via the DJ2D'
 	db	cr,lf
 	db	'or 88-2SIO serial port using the XMODEM protocol.',cr,lf,0
 
@@ -1156,164 +905,6 @@ mCpm	db	cr,lf,lf
 
 mCrLf	db	cr,lf,0
 
-	if DEBUG
-
-dbgByt	shld	dbgShl	;save hl
-	sta	dbgSa	;save a
-	mov	a,b
-	sta	dbgSb	;save b
-	xthl		;hl = start of string from stack
-	call	dispMsg
-	mov	a,m	;de = get address to print
-	inx	h
-	xthl		;update return address on stack
-	call	dispByt	;display word
-	lxi	h,mCrLf
-	call	dispMsg
-	lhld	dbgShl	;restore hl
-	lda	dbgSb	;restore b
-	mov	b,a
-	lda	dbgSa	;restore a
-	ret
-
-dbgWrd	shld	dbgShl	;save hl
-	xchg
-	shld	dbgSde	;save de
-	sta	dbgSa	;save a
-	mov	a,b
-	sta	dbgSb	;save b
-	xthl		;hl = start of string from stack
-	call	dispMsg
-	mov	e,m	;de = get address to print
-	inx	h	
-	mov	d,m
-	inx	h
-	xthl		;update return address on stack
-	xchg		;hl = de
-	call	dispWrd	;display word
-	lxi	h,mCrLf
-	call	dispMsg
-	lhld	dbgSde	;restore de
-	xchg
-	lhld	dbgShl	;restore hl
-	lda	dbgSb	;restore b
-	mov	b,a
-	lda	dbgSa	;restore a
-	ret
-
-dbgBytP	shld	dbgShl	;save hl
-	xchg
-	shld	dbgSde	;save de
-	sta	dbgSa	;save a
-	mov	a,b
-	sta	dbgSb	;save b
-	xthl		;hl = start of string from stack
-	call	dispMsg
-	mov	e,m	;de = get address to print
-	inx	h	
-	mov	d,m
-	inx	h
-	xthl		;update return address on stack
-	ldax	d
-	call	dispByt	;display byte
-	lxi	h,mCrLf
-	call	dispMsg
-	lhld	dbgSde	;restore de
-	xchg
-	lhld	dbgShl	;restore hl
-	lda	dbgSb	;restore b
-	mov	b,a
-	lda	dbgSa	;restore a
-	ret
-
-dbgWrdP	shld	dbgShl	;save hl
-	xchg
-	shld	dbgSde	;save de
-	sta	dbgSa	;save a
-	mov	a,b
-	sta	dbgSb	;save b
-	xthl		;hl = start of string from stack
-	call	dispMsg
-	mov	e,m	;de = get address to print
-	inx	h	
-	mov	d,m
-	inx	h
-	xthl		;update return address on stack
-	ldax	d
-	mov	l,a
-	inx	d
-	ldax	d
-	mov	h,a
-	call	dispWrd	;display word
-	lxi	h,mCrLf
-	call	dispMsg
-	lhld	dbgSde	;restore de
-	xchg
-	lhld	dbgShl	;restore hl
-	lda	dbgSb	;restore b
-	mov	b,a
-	lda	dbgSa	;restore a
-	ret
-
-dbgA	shld	dbgShl	;save hl
-	sta	dbgSa	;save a
-	mov	a,b
-	sta	dbgSb	;save b
-	xthl		;hl = start of string from stack
-	call	dispMsg
-	lda	dbgSa	;a = value to print
-	xthl		;update return address on stack
-	call	dispByt	;display word
-	lxi	h,mCrLf
-	call	dispMsg
-	lhld	dbgShl	;restore hl
-	lda	dbgSb	;restore b
-	mov	b,a
-	lda	dbgSa	;restore a
-	ret
-
-dbgDe	shld	dbgShl	;save hl
-	xchg
-	shld	dbgSde	;save de
-	sta	dbgSa	;save a
-	mov	a,b
-	sta	dbgSb	;save b
-	xthl		;hl = start of string from stack, de on stack
-	call	dispMsg
-	xthl		;hl = value, update return address on stack
-	call	dispWrd	;display word
-	lxi	h,mCrLf
-	call	dispMsg
-	lhld	dbgSde	;restore de
-	xchg
-	lhld	dbgShl	;restore hl
-	lda	dbgSb	;restore b
-	mov	b,a
-	lda	dbgSa	;restore a
-	ret
-
-dbgHl	shld	dbgShl	;save hl
-	sta	dbgSa	;save a
-	mov	a,b
-	sta	dbgSb	;save b
-	xthl		;hl = start of string from stack
-	call	dispMsg
-	xthl		;hl = value, update return address on stack
-	call	dispWrd	;display word
-	lxi	h,mCrLf
-	call	dispMsg
-	lhld	dbgShl	;restore hl
-	lda	dbgSb	;restore b
-	mov	b,a
-	lda	dbgSa	;restore a
-	ret
-
-dbgSa	ds	1	;save a
-dbgSb	ds	1	;save b
-dbgSde	ds	2	;save de
-dbgShl	ds	2	;save hl
-
-	endif
 
 ;****************************************************************************
 ;
@@ -1500,57 +1091,23 @@ s2OutB	in	s2bCtl		;wait for OK to transmit
 
 ; DJ2D Disk Drive Controller Equates
 
-	if 0
-
-FDCBASE	equ	IOBASE		;controller base address
-FDCSEL	equ	FDCBASE+1	;FDC drive select port
-FDCWAIT	equ	FDCBASE+2	;DJ status register
-FDCSTAT	equ	FDCBASE+4	;1791 status register
-FDCCMD	equ	FDCBASE+4	;1791 command register
-FDCTRK	equ	FDCBASE+5	;1791 track register
-FDCSEC	equ	FDCBASE+6	;1791 sector register
-FDCDATA	equ	FDCBASE+7	;1791 data in/out register
-
-STEP10	equ	2		;10ms step rate
-
-; Commands for 1791.
-
-cRESTOR	equ	000h+STEP10	;restore, no head load, no verify
-cSEEK	equ	018h+STEP10	;seek, head load, no verify
-cSTEPIN	equ	058h+STEP10	;step in, update track reg, head loaded
-cREAD	equ	088h		;read, head assumed settled
-cREADA	equ	0C4h		;read address, head assumed settled
-cWRITE	equ	0A8h		;write, head assumed settled
-cRESET	equ	0D0h		;reset 1791 to idle
-cWRTRK	equ	0F4h		;write track command
-
-cWAITHD	equ	004h		;bit for read/write to wait for head settle
-
-; Status bits from 1791
-
-sNOTRDY	equ	80h		;1=not ready
-sWRPROT	equ	40h		;1=write protected
-sHDLOAD	equ	20h		;1=head is loaded
-sSKERR	equ	10h		;1=seek error
-sCRCERR	equ	08h		;1=CRC error
-sTRACK0	equ	04h		;1=on track zero
-sINDEX	equ	02h		;1=index detected
-sBUSY	equ	01h		;1=1791 busy
-sRDY	equ	01h		;1=DJ READY
-sDATARQ	equ	02h		;1=DJ DRQ
-sINTRQ	equ	04h		;1=DJ INTRQ
-
-sSECERR	equ	10h		;1=sector not found
-sWRTFLT	equ	20h		;1=write fault
-sDLOST	equ	04h		;1=lost data 
-
-; Combined status flags for status of a seek, read, write
-
-fSEEK	equ	sSKERR+sCRCERR+sNOTRDY+sBUSY
-fREAD	equ	sSECERR+sCRCERR+sDLOST+sNOTRDY+sBUSY
-fWRITE	equ	fREAD+sWRPROT+sWRTFLT
-
-	endif
+DBOOT	equ	DJBASE		;DOS bootstrap routine
+TERMIN	equ	DJBASE+003H	;serial input
+TRMOUT	equ	DJBASE+006H	;serial output
+TKZERO	equ	DJBASE+009H	;recalibrate (seek to TRK0)
+TRKSET	equ	DJBASE+00CH	;seek
+SETSEC	equ	DJBASE+00FH	;select sector
+SETDMA	equ	DJBASE+012H	;set DMA address
+READ	equ	DJBASE+015H	;read a sector of disk data
+WRITE	equ	DJBASE+018H	;write a sector of disk data
+SELDRV	equ	DJBASE+01BH	;select a disk drive
+TPANIC	equ	DJBASE+01EH	;test for panic character
+TSTAT	equ	DJBASE+021H	;serial status input
+DMAST	equ	DJBASE+024H	;read current DMA address
+STATUS	equ	DJBASE+027H	;disk status input
+DSKERR	equ	DJBASE+02AH	;loop to strobe error LED
+SETDEN	equ	DJBASE+02DH	;set density
+SETSID	equ	DJBASE+030H	;set side for 2-headed drives
 
 ;--------------------------------------------------------------
 ; dRead - Read sector on current track.
@@ -1569,11 +1126,6 @@ dRead	push	d		;save de
 	mov	c,l
 	call	SETDMA
 	call	READ
-
-	lda	fmtFlag		;update lengths
-	ora	a
-	cnz	dSecFmt
-
 	pop	d		;restore de
 	ret
 
@@ -1582,7 +1134,7 @@ dRead	push	d		;save de
 ; On Entry:
 ;    l = desired track
 ; On Exit:
-;    C flag clear = good, C flag set = error
+;    
 ; Clobbers none
 ;--------------------------------------------------------------
 dSeek	call	dSelDrv		;make sure drive is selected
@@ -1592,8 +1144,10 @@ dSeek	call	dSelDrv		;make sure drive is selected
 	cpi	2
 	rnc			;return if track > 1
 
-	mvi	a,1		;set length flag
-	sta	fmtFlag
+	mvi	e,1		;read sector 1
+	lhld	trkPtr		;hl=track pointer
+	call	dRead
+	call	dSecFmt		;get sector format
 
 	ret
 
@@ -1636,210 +1190,65 @@ dSelDrv	lda	drvNum		;a=desired drive
 	ret
 
 ;--------------------------------------------------------------
-; dNxtSec - wait for next (any) sector. For the 1791, this
-;    routine simply increments and wraps the sector number
-;    passed in e, then falls into dWtSec to return bc with
-;    the offset of the sector within the track buffer.
+; dNextSec - Move to next sector. Reads odd sectors first
+;    then even sectors. Very first call for a track should
+;    have sector -1 in e.
 ; On Entry:
-;    Drive is selected, motor is running
-;    e = most recent sector number
+;    e = last sector read 
 ; On Exit:
-;    e = next sector sector number
-;    bc = byte offset of this sector in a track
+;    e = new sector to read
+; Clobbers e
 ;--------------------------------------------------------------
-dNxtSec	inr	e		;move to next sector
+dNxtSec	inr	e		;read every other sector
+	inr	e
+	lda	numSecs		;past end?
+	cmp	e
+	rnc			;no
 
-	lda	numSecs		;b = numSecs + 1
-	cmp	e		;verify between 1 and numSecs
-	jc	dWtSec		;good sector, compute bc
-
-dSec1	mvi	e,1		;restart at sector 1
-				;fall into dWtSec
-
-;--------------------------------------------------------------
-; dWtSec - wait for sector specified in e. For the 1791
-;    controller, this routine simply returns the offset
-;    of the sector within this track in bc.
-; On Entry:
-;    Drive is selected, motor is running
-;    e = desired sector number (must be 1-26 for 1791)
-; On Exit:
-;    e = sector number
-;    bc = byte offset of this sector in a track
-;--------------------------------------------------------------
-dWtSec	mov	a,e		;save the computed sector
-	sta	lastSec
-
-; compute bc=secLen*(sector-1)
-
-	lhld	secLen
-	xchg
-	lxi	h,0
-
-dWtLp	dcr	e
-	jz	dWtDn
-	dad	d
-	jmp	dWtLp
-
-dWtDn	mov	b,h
-	mov	c,l
-	lda	lastSec
-	mov	e,a
-
-	if DEBUG
-	call	dbgHl
-	db	cr,lf,'dWtSec sector offset=',0
-	endif
-
+	mvi	e,2		;else, do even sectors
 	ret
 
-	if 0
 ;--------------------------------------------------------------
-; dWtBusy - wait for sBUSY status bit to clear.
-; On Entry:
-;    1791 command issued
-; On Exit:
-;    1791 not busy
-;--------------------------------------------------------------
-dWtBusy	lda	FDCSTAT		;status is inverted
-	rar			;not ready bit in carry
-	jc	dWtBusy		;wait for busy to clear
-	ret
-
-	endif
-
-
-;--------------------------------------------------------------
-; dSecFmt - reads sector 1 of track 1 to determine sector
-;    length, sets secFmt: 0=128,1=256,2=512,3=1024
+; dSecFmt - Set sectors per track, sector length, and track
+;    length from the most recent sector read.
 ; On Entry:
 ;    drive selected
 ; On Exit:
-;    secFmt - sector length (0-3)
 ;    numSecs - sectors per track (26,26,15,8)
+;    secLen - sector length (128,256,512,1024)
+;    trkLen - track length
 ;--------------------------------------------------------------
 dSecFmt	call	STATUS
 	rar			;sector length is bits 2-3
-	rar
-	ani	003h		;isolate bits and clear carry
-	sta	secFmt
-
-	if	DEBUG
-	call	dbgA
-	db	'secFmt=',0
-	endif
-
-	lxi	h,sptTbl	;sectors per track table
-	mvi	d,0
+	ani	06h		;a=2*length code
+	mvi	d,0		;de=2*length code (16 bit)
 	mov	e,a
-	dad	d
+
+	lxi	h,sptTbl	;set sectors per track
+	dad	d		;index by length code
 	mov	a,m
 	sta	numSecs
+ 
+	lxi	h,seclTbl	;set sector length
+	dad	d		;index by length code
+	mov	c,m		;lsb
+	inx	h
+	mov	h,m		;msb
+	mov	l,c		;hl=sector length
+	shld	secLen
 
-	if	DEBUG
-	call	dbgA
-	db	'numSecs=',0
-	endif
-
-	call	dSecLen		;update sector length
-	call	dTrkLen		;update track length
-
-	xra	a		;clear length flag
-	sta	fmtFlag
-
+	lxi	h,trklTbl	;set track length
+	dad	d		;index by length code
+	mov	c,m		;lsb
+	inx	h
+	mov	h,m		;msb
+	mov	l,c		;hl=track length
+	shld	trkLen
 	ret
 
-sptTbl	db	26,26,15,8	;sectors per track
-
-
-;--------------------------------------------------------------
-; dSecLen - 
-; On Entry:
-;    secFmt
-; On Exit:
-;    secLen - sector length (128,256,512,1024)
-;--------------------------------------------------------------
-dSecLen	xchg			;save hl in de
-	lda	secFmt		;sector length format (0-3)
-	lxi	h,128		;sector length 128 bytes
-
-sLenLp	dcr	a
-	jm	sLenDn
-	dad	h		;double sector length
-	jmp	sLenLp
-
-sLenDn	shld	secLen
-	xchg			;restore hl, sec len in de
-
-	if	DEBUG
-	call	dbgDe
-	db	'dSecLen=',0
-	endif
-
-	ret
-
-;--------------------------------------------------------------
-; dTrkLen - calculates the number of bytes per track.
-; On Entry:
-;    secLen
-; On Exit:
-;    trkLen - track length (numSecs * secLen)
-;--------------------------------------------------------------
-dTrkLen push	h		;save hl
-	lxi	h,0		;initialize hl=0
-	lda	numSecs		;mult by num sectors
-
-tLenLp	dad	d		;add sector length
-	dcr	a
-	jnz	tLenLp
-
-tLenDn	shld	trkLen		;store track len
-	xchg			;store result in de
-
-	if	DEBUG
-	call	dbgDe
-	db	cr,lf,'dTrkLen=',0
-	endif
-
-	pop	h		;restore hl
-	ret
-
-	if 0	
-;--------------------------------------------------------------
-; readAdr - gets next encountered sector id bytes
-; On Entry:
-;    1791 on desired track
-; On Exit:
-;    Z flag set = good, Z flag clear = error
-;--------------------------------------------------------------
-readAdr	di			;disable interrupts
-
-	lxi	h,trkAdr	;track address
-
-	mvi	a,cREADA	;read address command
-	sta	FDCCMD
-
-raLoop	lda	FDCWAIT		;get status
-	ani	sINTRQ		;sector finished?
-	jnz	raDone		;yes
-
-	lda	FDCDATA		;store next byte in buffer
-	mov	m,a
-	inx	h		;bump memory pointer
-
-	jmp	raLoop
-
-raDone	lda	FDCSTAT		;get status of the read
-	ani	fREAD		;any of these bits is an error
-	ei			;re-enable interrupts
-	ret
-
-
-getMdl	lda	IOBASE-4
-	cpi	0c9h		; RET
-	ret
-
-	endif
+sptTbl	dw	26, 26, 15, 8
+seclTbl	dw	128, 256, 512, 1024
+trklTbl	dw	26*128, 26*256, 15*512, 8*1024
 
 ;**************************************************************************
 ; 
@@ -1850,12 +1259,9 @@ getMdl	lda	IOBASE-4
 
 drvNum	ds	1		;drive number to use
 trkNum	ds	1		;track number to read
-lastSec	ds	1		;last sector accessed on track
-secFmt	ds	1		;0=128,1=256,2=512,3=1024
 secLen	ds	2		;sector length
 numSecs	ds	1		;number of sectors per track
 trkLen	ds	2		;track length
-fmtFlag	ds	1		;update sector/track format flag
 trkPtr	ds	2		;pointer into trkBuf at track boundaries
 bufEnd	ds	2		;end address + 1 of last track spot in RAM
 
@@ -1884,6 +1290,8 @@ ourStk	equ	$
 ; track buffer runs from here to the end of memory
 
 	ds	PKTLEN		;space for pre-pended unsent data
+
 trkBuf	equ	$
 
 	end
+
